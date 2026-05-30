@@ -5,9 +5,22 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Iterator
+from typing import Any, Iterator
 
 from .models import OrderBookSnapshot, OrderIntent, OrderResult, PerpSnapshot, PerpWhaleSignal, WalletScore, WhaleSignal
+
+
+OPEN_ORDER_STATUSES = ("pending", "submitted", "paper_filled", "filled")
+CLOSED_ORDER_STATUSES = ("paper_settled", "settled")
+
+
+def _parse_iso_timestamp(value: str | None) -> datetime | None:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        return None
 
 
 class Storage:
@@ -608,22 +621,10 @@ class Storage:
                 """
             ).fetchall()
 
-    def list_open_perp_orders(self) -> list[sqlite3.Row]:
-        with self.connect() as connection:
-            return connection.execute(
-                """
-                SELECT perp_orders.id, perp_orders.market_id, perp_orders.asset_id, perp_orders.side,
-                       perp_orders.size_usdh, perp_orders.quantity, perp_orders.price,
-                       perp_orders.client_order_id, perp_orders.order_id, perp_orders.status,
-                       perp_orders.filled_price, perp_orders.paper_trade, perp_orders.signal_id,
-                       perp_orders.created_at, perp_orders.updated_at, perp_orders.details_json,
-                       perp_whale_signals.side AS signal_side, perp_whale_signals.coin AS signal_coin
-                FROM perp_orders
-                LEFT JOIN perp_whale_signals ON perp_whale_signals.id = perp_orders.signal_id
-                WHERE status IN ('pending', 'submitted', 'paper_filled', 'filled')
-                ORDER BY created_at DESC
-                """
-            ).fetchall()
+    def list_open_perp_orders(self) -> list[dict[str, Any]]:
+        positions = list(self._build_active_perp_positions().values())
+        positions.sort(key=lambda item: str(item["created_at"]), reverse=True)
+        return positions
 
     def latest_prediction_marks(self) -> list[sqlite3.Row]:
         with self.connect() as connection:
@@ -863,26 +864,91 @@ class Storage:
             return float(row["exposure"])
 
     def open_perp_market_ids(self) -> set[str]:
-        with self.connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT DISTINCT market_id
-                FROM perp_orders
-                WHERE status IN ('pending', 'submitted', 'paper_filled', 'filled')
-                """
-            ).fetchall()
-            return {str(row["market_id"]) for row in rows}
+        return set(self._build_active_perp_positions())
 
     def total_reserved_perp_exposure(self) -> float:
-        with self.connect() as connection:
-            row = connection.execute(
-                """
-                SELECT COALESCE(SUM(size_usdh), 0.0) AS exposure
-                FROM perp_orders
-                WHERE status IN ('pending', 'submitted', 'paper_filled', 'filled')
-                """
-            ).fetchone()
-            return float(row["exposure"])
+        return sum(float(position["size_usdh"]) for position in self._build_active_perp_positions().values())
+
+    def active_perp_position(self, market_id: str) -> dict[str, Any] | None:
+        return self._build_active_perp_positions().get(market_id)
+
+    def _build_active_perp_positions(self) -> dict[str, dict[str, Any]]:
+        active_positions: dict[str, dict[str, Any]] = {}
+        for row in self.list_perp_order_history():
+            market_id = str(row["market_id"])
+            status = str(row["status"])
+            if status not in OPEN_ORDER_STATUSES and status not in CLOSED_ORDER_STATUSES:
+                continue
+
+            created_at_raw = str(row["created_at"])
+            created_at = _parse_iso_timestamp(created_at_raw)
+            if created_at is None:
+                continue
+
+            order_side = str(row["side"]).lower()
+            active_position = active_positions.get(market_id)
+            if active_position is None:
+                if status in CLOSED_ORDER_STATUSES:
+                    continue
+                entry_price = float(row["filled_price"] if row["filled_price"] is not None else row["price"])
+                active_positions[market_id] = {
+                    "id": int(row["id"]),
+                    "market_id": market_id,
+                    "asset_id": int(row["asset_id"]),
+                    "side": order_side,
+                    "size_usdh": float(row["size_usdh"]),
+                    "quantity": float(row["quantity"]),
+                    "price": entry_price,
+                    "client_order_id": row["client_order_id"],
+                    "order_id": row["order_id"],
+                    "status": status,
+                    "filled_price": entry_price,
+                    "paper_trade": row["paper_trade"],
+                    "signal_id": row["signal_id"],
+                    "created_at": created_at_raw,
+                    "updated_at": row["updated_at"],
+                    "details_json": row["order_details_json"],
+                    "signal_side": str(row["signal_side"] or ("short" if order_side == "sell" else "long")).lower(),
+                    "signal_coin": row["signal_coin"] or market_id,
+                }
+                continue
+
+            if status in CLOSED_ORDER_STATUSES:
+                del active_positions[market_id]
+                continue
+
+            if order_side == str(active_position["side"]).lower():
+                current_quantity = float(active_position["quantity"])
+                next_quantity = float(row["quantity"])
+                total_quantity = current_quantity + next_quantity
+                current_entry_price = float(active_position["filled_price"] if active_position["filled_price"] is not None else active_position["price"])
+                next_entry_price = float(row["filled_price"] if row["filled_price"] is not None else row["price"])
+                average_price = next_entry_price
+                if total_quantity > 0:
+                    average_price = ((current_entry_price * current_quantity) + (next_entry_price * next_quantity)) / total_quantity
+                active_position.update(
+                    {
+                        "id": int(row["id"]),
+                        "quantity": total_quantity,
+                        "size_usdh": float(active_position["size_usdh"]) + float(row["size_usdh"]),
+                        "price": average_price,
+                        "client_order_id": row["client_order_id"],
+                        "order_id": row["order_id"],
+                        "status": status,
+                        "filled_price": average_price,
+                        "paper_trade": row["paper_trade"],
+                        "signal_id": row["signal_id"],
+                        "updated_at": row["updated_at"],
+                        "details_json": row["order_details_json"],
+                        "signal_side": str(row["signal_side"] or active_position["signal_side"] or ("short" if order_side == "sell" else "long")).lower(),
+                        "signal_coin": row["signal_coin"] or active_position["signal_coin"],
+                    }
+                )
+                continue
+
+            del active_positions[market_id]
+
+        return active_positions
 
     def get_ledger_state(self) -> sqlite3.Row:
         with self.connect() as connection:

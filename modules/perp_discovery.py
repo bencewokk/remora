@@ -4,12 +4,12 @@ import asyncio
 import logging
 from contextlib import suppress
 
-from config import Config
+from config import Config, DEFAULT_TRACKED_PERP_COINS
 from .adapter import HyperliquidAdapter
 from .models import PerpMarket
 
 LOGGER = logging.getLogger(__name__)
-TRACKED_PERP_COINS = ("BTC", "ETH", "SOL", "HYPE", "ARB", "OP", "NEAR", "XLM", "XMR", "LIT")
+TRACKED_PERP_COINS = DEFAULT_TRACKED_PERP_COINS
 
 
 def _ctx_float(ctx: dict, key: str) -> float:

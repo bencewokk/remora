@@ -7,6 +7,28 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
+DEFAULT_TRACKED_PERP_COINS = (
+    "BTC",
+    "ETH",
+    "SOL",
+    "HYPE",
+    "ARB",
+    "OP",
+    "NEAR",
+    "XLM",
+    "XMR",
+    "LIT",
+    "XRP",
+    "BNB",
+    "SUI",
+    "TON",
+    "INJ",
+    "LINK",
+    "TAO",
+    "DOGE",
+)
+
+
 def _parse_bool(value: str | None, default: bool) -> bool:
     if value is None:
         return default
@@ -16,6 +38,20 @@ def _parse_bool(value: str | None, default: bool) -> bool:
     if normalized in {"0", "false", "no", "off"}:
         return False
     return default
+
+
+def _parse_symbol_list(value: str | None, default: tuple[str, ...]) -> tuple[str, ...]:
+    if value is None:
+        return default
+    symbols: list[str] = []
+    seen: set[str] = set()
+    for item in value.split(","):
+        normalized = item.strip().upper()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        symbols.append(normalized)
+    return tuple(symbols) if symbols else default
 
 
 @dataclass(frozen=True)
@@ -46,6 +82,7 @@ class Config:
     oi_spike_threshold_pct: float
     perp_oi_spike_threshold_pct: float
     funding_divergence_threshold: float
+    tracked_perp_coins: tuple[str, ...]
     db_path: Path
     rest_url: str
     ws_url: str
@@ -82,6 +119,7 @@ class Config:
             oi_spike_threshold_pct=float(os.getenv("OI_SPIKE_THRESHOLD_PCT", "0.02")),
             perp_oi_spike_threshold_pct=float(os.getenv("PERP_OI_SPIKE_THRESHOLD_PCT", "0.5")),
             funding_divergence_threshold=float(os.getenv("FUNDING_DIVERGENCE_THRESHOLD", "0.0001")),
+            tracked_perp_coins=_parse_symbol_list(os.getenv("TRACKED_PERP_COINS"), DEFAULT_TRACKED_PERP_COINS),
             db_path=Path(os.getenv("TRADES_DB_PATH", str(root / "data" / "trades.db"))),
             rest_url=(
                 os.getenv("HL_REST_URL", "https://api.hyperliquid-testnet.xyz")

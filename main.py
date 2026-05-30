@@ -67,8 +67,8 @@ async def perp_signal_handler(
     while True:
         signal = await signal_queue.get()
         try:
-            if not risk_manager.can_trade_perp(signal.market_id, config.follow_size_usdh):
-                LOGGER.info("Perp risk manager rejected signal for market %s", signal.market_id)
+            if not risk_manager.can_trade_perp(signal.market_id, signal.side, config.follow_size_usdh):
+                LOGGER.info("Perp risk manager rejected %s signal for market %s", signal.side, signal.market_id)
                 continue
 
             signal_mid_price = signal.details.get("mid_price")
@@ -172,7 +172,7 @@ async def async_main() -> None:
     perp_snapshot_queue: asyncio.Queue = asyncio.Queue()
     perp_signal_queue: asyncio.Queue = asyncio.Queue()
     detector = WhaleDetector(config, storage, snapshot_queue, signal_queue)
-    perp_discovery = PerpDiscoveryService(config, adapter)
+    perp_discovery = PerpDiscoveryService(config, adapter, tracked_coins=config.tracked_perp_coins)
     perp_feeder = PerpFeeder(config, storage, perp_snapshot_queue, perp_discovery)
     perp_detector = PerpWhaleDetector(config, storage, perp_snapshot_queue, perp_signal_queue)
     wallet_tracker = WalletTracker(config, storage, adapter)
@@ -181,6 +181,7 @@ async def async_main() -> None:
         "testnet" if config.testnet else "mainnet",
         "paper" if config.paper_trade else "live",
     )
+    LOGGER.info("Configured tracked perp coins: %s", ", ".join(config.tracked_perp_coins))
 
     tasks = [
         asyncio.create_task(run_resilient("hip4-detector", detector.run), name="detector"),

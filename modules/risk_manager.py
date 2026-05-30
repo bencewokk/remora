@@ -60,10 +60,25 @@ class RiskManager:
             open_markets=self.storage.open_market_ids(),
         )
 
-    def can_trade_perp(self, market_id: str, size_usdh: float) -> bool:
+    def can_trade_perp(self, market_id: str, side: str, size_usdh: float) -> bool:
         snapshot = self.perp_snapshot()
-        if market_id in snapshot.open_markets:
-            return False
+        active_position = self.storage.active_perp_position(market_id)
+        if active_position is not None:
+            active_side = str(active_position["signal_side"] or ("short" if str(active_position["side"]).lower() == "sell" else "long")).lower()
+            requested_side = side.lower()
+            if requested_side == active_side:
+                return False
+
+            current_exposure = float(active_position["size_usdh"])
+            if size_usdh <= current_exposure:
+                return True
+
+            if snapshot.drawdown >= self.config.perp_drawdown_limit:
+                return False
+
+            projected_exposure = snapshot.total_reserved_exposure - current_exposure + (size_usdh - current_exposure)
+            return projected_exposure <= self.config.perp_max_position_usdh
+
         if snapshot.total_reserved_exposure + size_usdh > self.config.perp_max_position_usdh:
             return False
         if snapshot.drawdown >= self.config.perp_drawdown_limit:
