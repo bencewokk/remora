@@ -41,8 +41,37 @@
       padding: 18px;
       box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
     }
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
     .panel h2 { margin: 0 0 14px; font-size: 18px; }
     .stack { display: grid; gap: 18px; }
+    .tabs {
+      display: inline-flex;
+      gap: 8px;
+      padding: 4px;
+      border-radius: 999px;
+      background: rgba(11, 17, 23, 0.7);
+      border: 1px solid rgba(147, 164, 184, 0.18);
+    }
+    .tab {
+      border: 0;
+      background: transparent;
+      color: var(--muted);
+      padding: 8px 14px;
+      border-radius: 999px;
+      cursor: pointer;
+      font: inherit;
+    }
+    .tab.active {
+      color: var(--text);
+      background: rgba(77, 163, 255, 0.16);
+      box-shadow: inset 0 0 0 1px rgba(77, 163, 255, 0.28);
+    }
     table {
       width: 100%;
       border-collapse: collapse;
@@ -93,6 +122,7 @@
     }
     .badge-on { color: var(--green); border-color: rgba(55, 214, 122, 0.4); }
     .badge-off { color: var(--muted); }
+    .badge-blue { color: var(--blue); border-color: rgba(77, 163, 255, 0.4); }
     .progress {
       height: 8px;
       background: rgba(147, 164, 184, 0.18);
@@ -113,7 +143,7 @@
 <body>
   <header>
     <h1>Remora Wallet Intelligence</h1>
-    <p>Wallet leaderboard, recent whale signals, and paper order activity.</p>
+    <p>Wallet leaderboard, prediction and perp whale signals, and paper order activity.</p>
   </header>
   <main>
     <section class="panel">
@@ -134,17 +164,40 @@
     </section>
     <section class="stack">
       <section class="panel">
-        <h2>Recent Signals</h2>
+        <div class="panel-header">
+          <div>
+            <h2 id="signals-title">Prediction Signals</h2>
+            <div class="muted" id="signals-subtitle">Recent whale activity in the tracked prediction market.</div>
+          </div>
+          <div class="tabs" aria-label="Signal view selector">
+            <button class="tab active" data-tab="prediction">Prediction</button>
+            <button class="tab" data-tab="perp">Perp Signals</button>
+          </div>
+        </div>
         <div id="signals" class="feed"></div>
       </section>
       <section class="panel">
-        <h2>Recent Orders</h2>
+        <div class="panel-header">
+          <div>
+            <h2 id="orders-title">Prediction Orders</h2>
+            <div class="muted" id="orders-subtitle">Paper follow orders derived from recent signals.</div>
+          </div>
+        </div>
         <div id="orders" class="feed"></div>
       </section>
     </section>
   </main>
   <script>
-    const state = { wallets: [], sortKey: 'win_rate', sortDir: 'desc' };
+    const state = {
+      wallets: [],
+      predictionSignals: [],
+      predictionOrders: [],
+      perpSignals: [],
+      perpOrders: [],
+      activeTab: 'prediction',
+      sortKey: 'win_rate',
+      sortDir: 'desc',
+    };
 
     function truncateAddress(address) {
       return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'n/a';
@@ -152,6 +205,12 @@
 
     function formatPercent(value) {
       return `${(Number(value) * 100).toFixed(1)}%`;
+    }
+
+    function formatFundingRate(value) {
+      const percent = Number(value || 0) * 100;
+      const digits = Math.abs(percent) < 0.1 ? 3 : 2;
+      return `${percent.toFixed(digits)}%`;
     }
 
     function formatMoney(value) {
@@ -203,14 +262,34 @@
 
     function renderSignals(signals) {
       const container = document.getElementById('signals');
-      container.innerHTML = signals.map(signal => `
-        <article class="card">
-          <div class="row"><strong>${signal.market_id}</strong><span class="badge ${signal.wallet_bonus_applied ? 'badge-on' : 'badge-off'}">wallet bonus ${signal.wallet_bonus_applied ? 'on' : 'off'}</span></div>
-          <div class="row"><span>${signal.side}</span><span class="muted">${signal.trigger_type}</span></div>
-          <div class="muted">${formatIso(signal.timestamp)}</div>
-          <div class="progress"><span style="width:${Math.min(signal.confidence, 1) * 100}%"></span></div>
-        </article>
-      `).join('');
+      const isPerp = state.activeTab === 'perp';
+      container.innerHTML = signals.map(signal => {
+        if (isPerp) {
+          const fundingRate = Number(signal.details?.funding_rate || 0);
+          const openInterest = Number(signal.details?.open_interest || 0);
+          return `
+            <article class="card">
+              <div class="row"><strong>${signal.coin}</strong><span class="badge ${signal.wallet_bonus_applied ? 'badge-on' : 'badge-off'}">wallet bonus ${signal.wallet_bonus_applied ? 'on' : 'off'}</span></div>
+              <div class="row"><span>${signal.side}</span><span class="muted">${signal.trigger_type}</span></div>
+              <div class="row"><span class="muted">Funding ${formatFundingRate(fundingRate)}</span><span class="muted">OI ${openInterest.toFixed(2)}</span></div>
+              <div class="row">
+                <span class="badge ${signal.trigger_oi_spike ? 'badge-blue' : 'badge-off'}">oi spike ${signal.trigger_oi_spike ? 'on' : 'off'}</span>
+                <span class="badge ${signal.trigger_funding ? 'badge-blue' : 'badge-off'}">funding ${signal.trigger_funding ? 'on' : 'off'}</span>
+              </div>
+              <div class="muted">${formatIso(signal.timestamp)}</div>
+              <div class="progress"><span style="width:${Math.min(signal.confidence, 1) * 100}%"></span></div>
+            </article>
+          `;
+        }
+        return `
+          <article class="card">
+            <div class="row"><strong>${signal.market_id}</strong><span class="badge ${signal.wallet_bonus_applied ? 'badge-on' : 'badge-off'}">wallet bonus ${signal.wallet_bonus_applied ? 'on' : 'off'}</span></div>
+            <div class="row"><span>${signal.side}</span><span class="muted">${signal.trigger_type}</span></div>
+            <div class="muted">${formatIso(signal.timestamp)}</div>
+            <div class="progress"><span style="width:${Math.min(signal.confidence, 1) * 100}%"></span></div>
+          </article>
+        `;
+      }).join('');
     }
 
     function renderOrders(orders) {
@@ -219,21 +298,44 @@
         <article class="card">
           <div class="row"><strong>${order.market_id}</strong><span class="badge">${order.status}</span></div>
           <div class="row"><span>${order.side}</span><span>${order.size_usdh} USDH @ ${Number(order.price).toFixed(4)}</span></div>
+          <div class="row"><span class="muted">qty ${Number(order.quantity).toFixed(state.activeTab === 'perp' ? 6 : 0)}</span><span class="muted">${order.paper_trade ? 'paper' : 'live'}</span></div>
           <div class="muted">${formatIso(order.created_at)}</div>
         </article>
       `).join('');
     }
 
+    function renderActiveFeeds() {
+      const isPerp = state.activeTab === 'perp';
+      document.getElementById('signals-title').textContent = isPerp ? 'Perp Signals' : 'Prediction Signals';
+      document.getElementById('signals-subtitle').textContent = isPerp
+        ? 'Recent whale activity in tracked HIP-3 perpetual markets.'
+        : 'Recent whale activity in the tracked prediction market.';
+      document.getElementById('orders-title').textContent = isPerp ? 'Perp Orders' : 'Prediction Orders';
+      document.getElementById('orders-subtitle').textContent = isPerp
+        ? 'Paper follow orders for perpetual markets.'
+        : 'Paper follow orders derived from recent signals.';
+      renderSignals(isPerp ? state.perpSignals : state.predictionSignals);
+      renderOrders(isPerp ? state.perpOrders : state.predictionOrders);
+      document.querySelectorAll('.tab').forEach(tab => {
+        tab.classList.toggle('active', tab.dataset.tab === state.activeTab);
+      });
+    }
+
     async function refresh() {
-      const [wallets, signals, orders] = await Promise.all([
+      const [wallets, predictionSignals, predictionOrders, perpSignals, perpOrders] = await Promise.all([
         fetch('/api/wallets').then(r => r.json()),
         fetch('/api/signals').then(r => r.json()),
         fetch('/api/orders').then(r => r.json()),
+        fetch('/api/perp-signals').then(r => r.json()),
+        fetch('/api/perp-orders').then(r => r.json()),
       ]);
       state.wallets = wallets;
+      state.predictionSignals = predictionSignals;
+      state.predictionOrders = predictionOrders;
+      state.perpSignals = perpSignals;
+      state.perpOrders = perpOrders;
       renderWallets();
-      renderSignals(signals);
-      renderOrders(orders);
+      renderActiveFeeds();
     }
 
     document.querySelectorAll('#wallet-table th').forEach(th => {
@@ -246,6 +348,13 @@
           state.sortDir = key === 'address' ? 'asc' : 'desc';
         }
         renderWallets();
+      });
+    });
+
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        state.activeTab = tab.dataset.tab;
+        renderActiveFeeds();
       });
     });
 

@@ -97,5 +97,57 @@ def orders() -> object:
     )
 
 
+@app.get("/api/perp-signals")
+def perp_signals() -> object:
+    rows = get_storage().list_recent_perp_signals(limit=50)
+    return jsonify(
+        [
+            {
+                "id": row["id"],
+                "market_id": row["market_id"],
+                "asset_id": row["asset_id"],
+                "coin": row["coin"],
+                "side": row["side"],
+                "confidence": row["confidence"],
+                "trigger_type": row["trigger_type"],
+                "timestamp": row["timestamp"],
+                "wallet_bonus_applied": bool(row["wallet_bonus_applied"]),
+                "trigger_oi_spike": bool(row["trigger_oi_spike"]),
+                "trigger_funding": bool(row["trigger_funding"]),
+                "details": json.loads(row["details_json"]),
+            }
+            for row in rows
+        ]
+    )
+
+
+@app.get("/api/perp-orders")
+def perp_orders() -> object:
+    rows = get_storage().list_recent_perp_orders(limit=50)
+    return jsonify(
+        [
+            {
+                "id": row["id"],
+                "market_id": row["market_id"],
+                "asset_id": row["asset_id"],
+                "side": row["side"],
+                "size_usdh": row["size_usdh"],
+                "quantity": row["quantity"],
+                "price": row["price"],
+                "client_order_id": row["client_order_id"],
+                "order_id": row["order_id"],
+                "status": row["status"],
+                "filled_price": row["filled_price"],
+                "paper_trade": bool(row["paper_trade"]),
+                "signal_id": row["signal_id"],
+                "created_at": row["created_at"],
+                "updated_at": row["updated_at"],
+                "details": json.loads(row["details_json"]),
+            }
+            for row in rows
+        ]
+    )
+
+
 if __name__ == "__main__":
     app.run(debug=True)

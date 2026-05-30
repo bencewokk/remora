@@ -30,6 +30,16 @@ class MarketInfo:
 
 
 @dataclass(frozen=True)
+class PerpMarket:
+    market_id: str
+    coin: str
+    asset_id: int
+    mark_price: float | None
+    funding_rate: float
+    open_interest: float
+
+
+@dataclass(frozen=True)
 class OrderBookSnapshot:
     market_id: str
     asset_id: int
@@ -47,6 +57,26 @@ class OrderBookSnapshot:
 
 
 @dataclass(frozen=True)
+class PerpSnapshot:
+    market_id: str
+    coin: str
+    asset_id: int
+    timestamp: datetime = field(default_factory=utc_now)
+    sequence_id: int | None = None
+    bids: tuple[DepthLevel, ...] = field(default_factory=tuple)
+    asks: tuple[DepthLevel, ...] = field(default_factory=tuple)
+    best_bid: float | None = None
+    best_ask: float | None = None
+    mid_price: float | None = None
+    funding_rate: float = 0.0
+    open_interest: float = 0.0
+    oi_change_pct: float = 0.0
+    is_reset: bool = False
+    trigger_address: str | None = None
+    raw_message: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
 class WhaleSignal:
     market_id: str
     asset_id: int
@@ -56,6 +86,22 @@ class WhaleSignal:
     timestamp: datetime = field(default_factory=utc_now)
     signal_id: int | None = None
     wallet_bonus_applied: bool = False
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class PerpWhaleSignal:
+    market_id: str
+    coin: str
+    asset_id: int
+    side: str
+    confidence: float
+    trigger_type: str
+    timestamp: datetime = field(default_factory=utc_now)
+    signal_id: int | None = None
+    wallet_bonus_applied: bool = False
+    trigger_oi_spike: bool = False
+    trigger_funding: bool = False
     details: dict[str, Any] = field(default_factory=dict)
 
 
@@ -77,7 +123,7 @@ class OrderIntent:
     asset_id: int
     side: str
     size_usdh: float
-    quantity: int
+    quantity: float
     price: float
     client_order_id: str
     paper_trade: bool

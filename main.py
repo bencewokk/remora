@@ -3,13 +3,26 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from typing import Awaitable, Callable
 
 from config import Config
-from modules import HyperliquidAdapter, L2BookFeeder, OrderExecutor, RiskManager, WalletTracker, WhaleDetector, discover_btc_daily_market
-from modules.models import WhaleSignal
+from modules import HyperliquidAdapter, L2BookFeeder, OrderExecutor, PerpDiscoveryService, PerpFeeder, PerpMarket, PerpWhaleDetector, RiskManager, WalletTracker, WhaleDetector, discover_btc_daily_market
+from modules.models import PerpWhaleSignal, WhaleSignal
 from modules.storage import Storage
 
 LOGGER = logging.getLogger(__name__)
+
+
+async def run_resilient(name: str, operation: Callable[[], Awaitable[None]]) -> None:
+    while True:
+        try:
+            await operation()
+            LOGGER.warning("Task %s exited unexpectedly; restarting", name)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("Task %s crashed; restarting", name)
+        await asyncio.sleep(5)
 
 
 async def signal_handler(
@@ -40,6 +53,48 @@ async def signal_handler(
                 signal_id=signal.signal_id,
             )
             LOGGER.info("Placed %s order for %s at %.4f via %s", signal.side, signal.market_id, price, result.status)
+        finally:
+            signal_queue.task_done()
+
+
+async def perp_signal_handler(
+    config: Config,
+    signal_queue: asyncio.Queue[PerpWhaleSignal],
+    risk_manager: RiskManager,
+    executor: OrderExecutor,
+    discovery: PerpDiscoveryService,
+) -> None:
+    while True:
+        signal = await signal_queue.get()
+        try:
+            if not risk_manager.can_trade_perp(signal.market_id, config.follow_size_usdh):
+                LOGGER.info("Perp risk manager rejected signal for market %s", signal.market_id)
+                continue
+
+            mid_price = signal.details.get("mid_price")
+            if not isinstance(mid_price, (int, float)) or float(mid_price) <= 0:
+                LOGGER.info("Skipping perp signal without mid price for market %s", signal.market_id)
+                continue
+
+            price = float(mid_price) * (1.001 if signal.side == "long" else 0.999)
+            market = discovery.get_market(signal.coin)
+            if market is None:
+                market = PerpMarket(
+                    market_id=signal.market_id,
+                    coin=signal.coin,
+                    asset_id=signal.asset_id,
+                    mark_price=float(mid_price),
+                    funding_rate=float(signal.details.get("funding_rate", 0.0)),
+                    open_interest=float(signal.details.get("open_interest", 0.0)),
+                )
+            result = await executor.place_perp_limit_order(
+                market=market,
+                side="buy" if signal.side == "long" else "sell",
+                size_usdh=config.follow_size_usdh,
+                limit_price=price,
+                signal_id=signal.signal_id,
+            )
+            LOGGER.info("Placed perp %s order for %s at %.4f via %s", signal.side, signal.market_id, price, result.status)
         finally:
             signal_queue.task_done()
 
@@ -94,7 +149,12 @@ async def async_main() -> None:
     executor = OrderExecutor(config, storage, adapter)
     snapshot_queue: asyncio.Queue = asyncio.Queue()
     signal_queue: asyncio.Queue = asyncio.Queue()
+    perp_snapshot_queue: asyncio.Queue = asyncio.Queue()
+    perp_signal_queue: asyncio.Queue = asyncio.Queue()
     detector = WhaleDetector(config, storage, snapshot_queue, signal_queue)
+    perp_discovery = PerpDiscoveryService(config, adapter)
+    perp_feeder = PerpFeeder(config, storage, perp_snapshot_queue, perp_discovery)
+    perp_detector = PerpWhaleDetector(config, storage, perp_snapshot_queue, perp_signal_queue)
     wallet_tracker = WalletTracker(config, storage, adapter)
     LOGGER.info(
         "Remora initialized for %s in %s mode",
@@ -102,16 +162,42 @@ async def async_main() -> None:
         "paper" if config.paper_trade else "live",
     )
 
-    detector_task = asyncio.create_task(detector.run(), name="detector")
-    signal_task = asyncio.create_task(signal_handler(config, signal_queue, risk_manager, executor), name="signal-handler")
-    discovery_task = asyncio.create_task(discovery_loop(config, adapter, storage, snapshot_queue), name="discovery-loop")
-    wallet_tracker_task = asyncio.create_task(wallet_tracker.run(), name="wallet-tracker")
+    tasks = [
+        asyncio.create_task(run_resilient("hip4-detector", detector.run), name="detector"),
+        asyncio.create_task(
+            run_resilient(
+                "hip4-signal-handler",
+                lambda: signal_handler(config, signal_queue, risk_manager, executor),
+            ),
+            name="signal-handler",
+        ),
+        asyncio.create_task(
+            run_resilient(
+                "hip4-discovery-loop",
+                lambda: discovery_loop(config, adapter, storage, snapshot_queue),
+            ),
+            name="discovery-loop",
+        ),
+        asyncio.create_task(run_resilient("wallet-tracker", wallet_tracker.run), name="wallet-tracker"),
+        asyncio.create_task(run_resilient("perp-discovery", perp_discovery.run), name="perp-discovery"),
+        asyncio.create_task(run_resilient("perp-feeder", perp_feeder.run), name="perp-feeder"),
+        asyncio.create_task(run_resilient("perp-detector", perp_detector.run), name="perp-detector"),
+        asyncio.create_task(
+            run_resilient(
+                "perp-signal-handler",
+                lambda: perp_signal_handler(config, perp_signal_queue, risk_manager, executor, perp_discovery),
+            ),
+            name="perp-signal-handler",
+        ),
+    ]
 
     try:
-        await asyncio.gather(detector_task, signal_task, discovery_task, wallet_tracker_task)
+        await asyncio.gather(*tasks)
     finally:
+        await perp_discovery.stop()
+        await perp_feeder.stop()
         await wallet_tracker.stop()
-        for task in (wallet_tracker_task, discovery_task, signal_task, detector_task):
+        for task in tasks:
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task

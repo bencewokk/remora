@@ -94,6 +94,20 @@ class HyperliquidAdapter:
             return list(await self.post_info({"type": "userFills", **payload}))
         return list(await self.post_info({"type": "userFillsByTime", "startTime": start_time, **payload}))
 
+    async def fetch_perp_meta_and_asset_ctxs(self) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        if self._sdk_info is not None and hasattr(self._sdk_info, "meta_and_asset_ctxs"):
+            try:
+                response = self._sdk_info.meta_and_asset_ctxs()
+                if isinstance(response, (list, tuple)) and len(response) == 2:
+                    return dict(response[0]), list(response[1])
+            except Exception:
+                pass
+
+        response = await self.post_info({"type": "metaAndAssetCtxs"})
+        if not isinstance(response, list) or len(response) != 2:
+            raise ValueError(f"Unexpected metaAndAssetCtxs response: {response!r}")
+        return dict(response[0]), list(response[1])
+
     def patch_sdk_outcome_assets(self, outcome_meta: dict[str, Any]) -> None:
         if self._sdk_info is None:
             return
