@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
-import re
-from collections import defaultdict
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -15,7 +13,6 @@ from .models import WalletScore
 from .storage import Storage
 
 LOGGER = logging.getLogger(__name__)
-OUTCOME_COIN_PATTERN = re.compile(r"^#\d+$")
 WALLET_STARTUP_INITIAL_ADDRESSES = 5
 WALLET_STARTUP_POLL_SECONDS = 1.0
 WALLET_REFRESH_DELAY_MIN_SECONDS = 0.3
@@ -24,10 +21,9 @@ WALLET_REFRESH_MAX_ADDRESSES = 10
 
 
 @dataclass(frozen=True)
-class ResolvedWalletTrade:
-    market_id: str
+class ScoredWalletFill:
     pnl_usdh: float
-    last_trade_ts: int
+    trade_ts: int
 
 
 class WalletTrackerRateLimitSkip(Exception):
@@ -104,18 +100,18 @@ class WalletTracker:
                     await self._pause(self._inter_wallet_delay_seconds())
                 continue
 
-            resolved_trades = self._resolved_outcome_trades(fills)
-            trade_count = len(resolved_trades)
+            scored_fills = self._scored_fills(fills)
+            trade_count = len(scored_fills)
             if trade_count == 0:
                 if index < len(refresh_addresses) - 1:
                     await self._pause(self._inter_wallet_delay_seconds())
                 continue
 
-            win_count = sum(1 for trade in resolved_trades.values() if trade.pnl_usdh > 0)
-            total_pnl = sum(trade.pnl_usdh for trade in resolved_trades.values())
+            win_count = sum(1 for fill in scored_fills if fill.pnl_usdh > 0)
+            total_pnl = sum(fill.pnl_usdh for fill in scored_fills)
             avg_pnl = total_pnl / trade_count if trade_count else 0.0
             win_rate = win_count / trade_count if trade_count else 0.0
-            last_trade_ts = max((trade.last_trade_ts for trade in resolved_trades.values()), default=None)
+            last_trade_ts = max((fill.trade_ts for fill in scored_fills), default=None)
             if last_trade_ts is not None:
                 last_trade_ts = self._normalize_unix_timestamp(last_trade_ts)
             scores.append(
@@ -207,33 +203,20 @@ class WalletTracker:
         return "429" in message or "too many requests" in message
 
     @staticmethod
-    def _resolved_outcome_trades(fills: list[dict]) -> dict[str, ResolvedWalletTrade]:
-        grouped: dict[str, dict[str, float | int]] = defaultdict(lambda: {"pnl": 0.0, "last_trade_ts": 0})
+    def _scored_fills(fills: list[dict]) -> list[ScoredWalletFill]:
+        scored_fills: list[ScoredWalletFill] = []
         for fill in fills:
-            coin = str(fill.get("coin", ""))
-            if not OUTCOME_COIN_PATTERN.match(coin):
-                continue
-            market_id = WalletTracker._market_id_from_coin(coin)
             pnl = float(fill.get("closedPnl", 0.0) or 0.0)
-            timestamp = WalletTracker._normalize_unix_timestamp(int(fill.get("time", 0) or 0))
             if pnl == 0.0:
                 continue
-            grouped[market_id]["pnl"] = float(grouped[market_id]["pnl"]) + pnl
-            grouped[market_id]["last_trade_ts"] = max(int(grouped[market_id]["last_trade_ts"]), timestamp)
-
-        return {
-            market_id: ResolvedWalletTrade(
-                market_id=market_id,
-                pnl_usdh=float(values["pnl"]),
-                last_trade_ts=int(values["last_trade_ts"]),
+            timestamp = WalletTracker._normalize_unix_timestamp(int(fill.get("time", 0) or 0))
+            scored_fills.append(
+                ScoredWalletFill(
+                    pnl_usdh=pnl,
+                    trade_ts=timestamp,
+                )
             )
-            for market_id, values in grouped.items()
-        }
-
-    @staticmethod
-    def _market_id_from_coin(coin: str) -> str:
-        encoding = int(coin[1:])
-        return str(encoding // 10)
+        return scored_fills
 
     @staticmethod
     def _normalize_unix_timestamp(timestamp: int) -> int:
