@@ -28,6 +28,34 @@
     }
     header h1 { margin: 0; font-size: 28px; }
     header p { margin: 6px 0 0; color: var(--muted); }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      padding: 0 24px 16px;
+    }
+    .metric-card {
+      background: rgba(18, 26, 35, 0.92);
+      border: 1px solid var(--panel-border);
+      border-radius: 18px;
+      padding: 16px 18px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.2);
+    }
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .metric-value {
+      font-size: 28px;
+      font-weight: 700;
+      margin: 6px 0 4px;
+    }
+    .metric-detail {
+      color: var(--muted);
+      font-size: 13px;
+    }
     main {
       display: grid;
       grid-template-columns: 1.4fr 1fr;
@@ -123,6 +151,7 @@
     .badge-on { color: var(--green); border-color: rgba(55, 214, 122, 0.4); }
     .badge-off { color: var(--muted); }
     .badge-blue { color: var(--blue); border-color: rgba(77, 163, 255, 0.4); }
+    .badge-red { color: var(--red); border-color: rgba(249, 112, 102, 0.4); }
     .progress {
       height: 8px;
       background: rgba(147, 164, 184, 0.18);
@@ -136,7 +165,11 @@
       background: linear-gradient(90deg, var(--blue), var(--green));
     }
     @media (max-width: 980px) {
+      .summary-grid { grid-template-columns: 1fr 1fr; }
       main { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 640px) {
+      .summary-grid { grid-template-columns: 1fr; }
     }
   </style>
 </head>
@@ -145,6 +178,7 @@
     <h1>Remora Wallet Intelligence</h1>
     <p>Wallet leaderboard, prediction and perp whale signals, and paper order activity.</p>
   </header>
+  <section class="summary-grid" id="summary-cards"></section>
   <main>
     <section class="panel">
       <h2>Whale Leaderboard</h2>
@@ -185,11 +219,22 @@
         </div>
         <div id="orders" class="feed"></div>
       </section>
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2 id="positions-title">Prediction Positions</h2>
+            <div class="muted" id="positions-subtitle">Open paper positions marked against the latest stored price.</div>
+          </div>
+        </div>
+        <div id="positions" class="feed"></div>
+      </section>
     </section>
   </main>
   <script>
     const state = {
       wallets: [],
+      summary: null,
+      positions: { prediction: [], perp: [], all: [] },
       predictionSignals: [],
       predictionOrders: [],
       perpSignals: [],
@@ -218,6 +263,12 @@
       return `${amount >= 0 ? '+' : ''}${amount.toFixed(2)}`;
     }
 
+    function formatSignedPercent(value, digits = 2) {
+      if (value === null || value === undefined) return 'n/a';
+      const percent = Number(value) * 100;
+      return `${percent >= 0 ? '+' : ''}${percent.toFixed(digits)}%`;
+    }
+
     function formatTime(timestamp) {
       if (!timestamp) return 'n/a';
       const raw = Number(timestamp);
@@ -227,6 +278,15 @@
 
     function formatIso(value) {
       return value ? new Date(value).toLocaleString() : 'n/a';
+    }
+
+    function formatAge(seconds) {
+      if (seconds === null || seconds === undefined) return 'n/a';
+      const totalSeconds = Number(seconds);
+      const hours = Math.floor(totalSeconds / 3600);
+      const minutes = Math.floor((totalSeconds % 3600) / 60);
+      if (hours > 0) return `${hours}h ${minutes}m`;
+      return `${minutes}m`;
     }
 
     function winRateClass(winRate) {
@@ -258,6 +318,43 @@
           <td>${formatTime(wallet.last_trade_ts)}</td>
         </tr>
       `).join('');
+    }
+
+    function renderSummary(summary) {
+      const container = document.getElementById('summary-cards');
+      if (!summary) {
+        container.innerHTML = '';
+        return;
+      }
+      const prediction = summary.signal_quality?.prediction || {};
+      const perp = summary.signal_quality?.perp || {};
+      const portfolio = summary.portfolio || {};
+      container.innerHTML = `
+        <article class="metric-card">
+          <div class="metric-label">Prediction Markout</div>
+          <div class="metric-value ${Number(prediction.win_rate || 0) >= 0.5 ? 'metric-green' : 'metric-red'}">${formatPercent(prediction.win_rate || 0)}</div>
+          <div class="metric-detail">${prediction.winning_signals || 0}/${prediction.evaluated_signals || 0} signals favorable</div>
+          <div class="metric-detail">Avg markout ${formatSignedPercent(prediction.avg_markout_pct)}</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Perp Markout</div>
+          <div class="metric-value ${Number(perp.win_rate || 0) >= 0.5 ? 'metric-green' : 'metric-red'}">${formatPercent(perp.win_rate || 0)}</div>
+          <div class="metric-detail">${perp.winning_signals || 0}/${perp.evaluated_signals || 0} signals favorable</div>
+          <div class="metric-detail">Avg markout ${formatSignedPercent(perp.avg_markout_pct)}</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Open Positions</div>
+          <div class="metric-value">${portfolio.total_open_positions || 0}</div>
+          <div class="metric-detail">Prediction ${portfolio.prediction_open_positions || 0} | Perp ${portfolio.perp_open_positions || 0}</div>
+          <div class="metric-detail">Reserved ${formatMoney((portfolio.prediction_reserved_exposure_usdh || 0) + (portfolio.perp_reserved_exposure_usdh || 0))} USDH</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Open PnL</div>
+          <div class="metric-value ${(portfolio.total_unrealized_pnl_usdh || 0) >= 0 ? 'metric-green' : 'metric-red'}">${formatMoney(portfolio.total_unrealized_pnl_usdh || 0)}</div>
+          <div class="metric-detail">Prediction ${formatMoney(portfolio.prediction_unrealized_pnl_usdh || 0)}</div>
+          <div class="metric-detail">Perp ${formatMoney(portfolio.perp_unrealized_pnl_usdh || 0)}</div>
+        </article>
+      `;
     }
 
     function renderSignals(signals) {
@@ -304,6 +401,26 @@
       `).join('');
     }
 
+    function renderPositions(positions) {
+      const container = document.getElementById('positions');
+      if (!positions.length) {
+        container.innerHTML = '<div class="muted">No open positions.</div>';
+        return;
+      }
+      container.innerHTML = positions.map(position => {
+        const direction = position.market_type === 'perp' ? position.direction : position.contract_side;
+        const pnlClass = Number(position.unrealized_pnl_usdh || 0) >= 0 ? 'badge-on' : 'badge-red';
+        return `
+          <article class="card">
+            <div class="row"><strong>${position.market_type === 'perp' ? position.coin : position.market_id}</strong><span class="badge ${pnlClass}">${formatMoney(position.unrealized_pnl_usdh || 0)} UPNL</span></div>
+            <div class="row"><span>${direction || 'n/a'}</span><span class="muted">${position.status}</span></div>
+            <div class="row"><span>Entry ${Number(position.entry_price).toFixed(position.market_type === 'perp' ? 2 : 4)}</span><span>Mark ${position.current_mark_price === null || position.current_mark_price === undefined ? 'n/a' : Number(position.current_mark_price).toFixed(position.market_type === 'perp' ? 2 : 4)}</span></div>
+            <div class="row"><span class="muted">Size ${Number(position.size_usdh).toFixed(2)} USDH</span><span class="muted">Age ${formatAge(position.age_seconds)}</span></div>
+          </article>
+        `;
+      }).join('');
+    }
+
     function renderActiveFeeds() {
       const isPerp = state.activeTab === 'perp';
       document.getElementById('signals-title').textContent = isPerp ? 'Perp Signals' : 'Prediction Signals';
@@ -314,26 +431,36 @@
       document.getElementById('orders-subtitle').textContent = isPerp
         ? 'Paper follow orders for perpetual markets.'
         : 'Paper follow orders derived from recent signals.';
+      document.getElementById('positions-title').textContent = isPerp ? 'Perp Positions' : 'Prediction Positions';
+      document.getElementById('positions-subtitle').textContent = isPerp
+        ? 'Open perp paper positions marked against the latest stored price.'
+        : 'Open prediction paper positions marked against the latest stored price.';
       renderSignals(isPerp ? state.perpSignals : state.predictionSignals);
       renderOrders(isPerp ? state.perpOrders : state.predictionOrders);
+      renderPositions(isPerp ? state.positions.perp : state.positions.prediction);
       document.querySelectorAll('.tab').forEach(tab => {
         tab.classList.toggle('active', tab.dataset.tab === state.activeTab);
       });
     }
 
     async function refresh() {
-      const [wallets, predictionSignals, predictionOrders, perpSignals, perpOrders] = await Promise.all([
+      const [wallets, summary, positions, predictionSignals, predictionOrders, perpSignals, perpOrders] = await Promise.all([
         fetch('/api/wallets').then(r => r.json()),
+        fetch('/api/dashboard-summary').then(r => r.json()),
+        fetch('/api/positions').then(r => r.json()),
         fetch('/api/signals').then(r => r.json()),
         fetch('/api/orders').then(r => r.json()),
         fetch('/api/perp-signals').then(r => r.json()),
         fetch('/api/perp-orders').then(r => r.json()),
       ]);
       state.wallets = wallets.filter(wallet => Number(wallet.trade_count) >= 3);
+      state.summary = summary;
+      state.positions = positions;
       state.predictionSignals = predictionSignals;
       state.predictionOrders = predictionOrders;
       state.perpSignals = perpSignals;
       state.perpOrders = perpOrders;
+      renderSummary(summary);
       renderWallets();
       renderActiveFeeds();
     }

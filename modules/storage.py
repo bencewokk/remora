@@ -479,6 +479,22 @@ class Storage:
                 (limit,),
             ).fetchall()
 
+    def list_open_orders(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT orders.id, orders.market_id, orders.asset_id, orders.side, orders.size_usdh,
+                       orders.quantity, orders.price, orders.client_order_id, orders.order_id,
+                       orders.status, orders.filled_price, orders.paper_trade, orders.signal_id,
+                       orders.created_at, orders.updated_at, orders.details_json,
+                       whale_signals.side AS signal_side
+                FROM orders
+                LEFT JOIN whale_signals ON whale_signals.id = orders.signal_id
+                WHERE status IN ('pending', 'submitted', 'paper_filled', 'filled')
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+
     def list_recent_perp_orders(self, limit: int = 50) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(
@@ -491,6 +507,60 @@ class Storage:
                 LIMIT ?
                 """,
                 (limit,),
+            ).fetchall()
+
+    def list_open_perp_orders(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT perp_orders.id, perp_orders.market_id, perp_orders.asset_id, perp_orders.side,
+                       perp_orders.size_usdh, perp_orders.quantity, perp_orders.price,
+                       perp_orders.client_order_id, perp_orders.order_id, perp_orders.status,
+                       perp_orders.filled_price, perp_orders.paper_trade, perp_orders.signal_id,
+                       perp_orders.created_at, perp_orders.updated_at, perp_orders.details_json,
+                       perp_whale_signals.side AS signal_side, perp_whale_signals.coin AS signal_coin
+                FROM perp_orders
+                LEFT JOIN perp_whale_signals ON perp_whale_signals.id = perp_orders.signal_id
+                WHERE status IN ('pending', 'submitted', 'paper_filled', 'filled')
+                ORDER BY created_at DESC
+                """
+            ).fetchall()
+
+    def latest_prediction_marks(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT current.market_id, current.asset_id, current.timestamp,
+                       current.best_bid, current.best_ask, current.mid_price
+                FROM book_events AS current
+                INNER JOIN (
+                    SELECT market_id, asset_id, MAX(timestamp) AS max_timestamp
+                    FROM book_events
+                    GROUP BY market_id, asset_id
+                ) AS latest
+                  ON latest.market_id = current.market_id
+                 AND latest.asset_id = current.asset_id
+                 AND latest.max_timestamp = current.timestamp
+                """
+            ).fetchall()
+
+    def latest_perp_marks(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT current.market_id, current.asset_id, current.coin, current.timestamp,
+                       current.best_bid, current.best_ask, current.mid_price,
+                       current.funding_rate, current.open_interest
+                FROM perp_book_events AS current
+                INNER JOIN (
+                    SELECT market_id, asset_id, MAX(timestamp) AS max_timestamp
+                    FROM perp_book_events
+                    GROUP BY market_id, asset_id
+                ) AS latest
+                  ON latest.market_id = current.market_id
+                 AND latest.asset_id = current.asset_id
+                 AND latest.max_timestamp = current.timestamp
+                """
             ).fetchall()
 
     def insert_order_intent(self, order: OrderIntent, status: str, details: dict | None = None) -> int:
