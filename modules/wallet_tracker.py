@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 from collections import defaultdict
 from contextlib import suppress
@@ -15,11 +16,11 @@ from .storage import Storage
 
 LOGGER = logging.getLogger(__name__)
 OUTCOME_COIN_PATTERN = re.compile(r"^#\d+$")
-WALLET_REFRESH_DELAY_SECONDS = 2.0
+WALLET_STARTUP_INITIAL_ADDRESSES = 5
+WALLET_STARTUP_POLL_SECONDS = 1.0
+WALLET_REFRESH_DELAY_MIN_SECONDS = 0.3
+WALLET_REFRESH_DELAY_MAX_SECONDS = 0.8
 WALLET_REFRESH_MAX_ADDRESSES = 10
-WALLET_REFRESH_BACKOFF_BASE_SECONDS = 2.0
-WALLET_REFRESH_BACKOFF_CAP_SECONDS = 30.0
-WALLET_REFRESH_MAX_RETRIES = 5
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,12 @@ class ResolvedWalletTrade:
     last_trade_ts: int
 
 
+class WalletTrackerRateLimitSkip(Exception):
+    def __init__(self, address: str) -> None:
+        super().__init__(f"Wallet tracker rate limited for {address}")
+        self.address = address
+
+
 class WalletTracker:
     def __init__(self, config: Config, storage: Storage, adapter: HyperliquidAdapter) -> None:
         self.config = config
@@ -36,51 +43,72 @@ class WalletTracker:
         self.adapter = adapter
         self._stop_event = asyncio.Event()
         self._refresh_cursor = 0
+        self._startup_refresh_completed = False
+        self._startup_wait_logged = False
 
     async def run(self) -> None:
         while not self._stop_event.is_set():
+            wait_seconds = self.config.wallet_refresh_seconds
             try:
-                await self.refresh_once()
+                if not self._startup_refresh_completed:
+                    self._startup_refresh_completed = await self._refresh_startup_addresses_once()
+                    wait_seconds = (
+                        self.config.wallet_refresh_seconds
+                        if self._startup_refresh_completed
+                        else WALLET_STARTUP_POLL_SECONDS
+                    )
+                else:
+                    await self.refresh_once()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 LOGGER.warning("Wallet tracker refresh failed: %s", exc)
+                if not self._startup_refresh_completed:
+                    wait_seconds = WALLET_STARTUP_POLL_SECONDS
             if self._stop_event.is_set():
                 break
             with suppress(asyncio.TimeoutError):
-                await asyncio.wait_for(self._stop_event.wait(), timeout=self.config.wallet_refresh_seconds)
+                await asyncio.wait_for(self._stop_event.wait(), timeout=wait_seconds)
 
     async def stop(self) -> None:
         self._stop_event.set()
 
-    async def refresh_once(self) -> None:
-        addresses = self.storage.list_tracked_wallet_addresses()
-        if not addresses:
+    async def refresh_once(self, addresses: list[str] | None = None, cycle_name: str = "scheduled") -> None:
+        tracked_addresses = addresses if addresses is not None else self.storage.list_tracked_wallet_addresses()
+        if not tracked_addresses:
             LOGGER.info("Wallet tracker has no tracked wallet addresses yet")
             return
 
-        refresh_addresses = self._select_addresses_for_refresh(addresses)
+        refresh_addresses = tracked_addresses if addresses is not None else self._select_addresses_for_refresh(tracked_addresses)
         if not refresh_addresses:
             return
 
         now_ts = int(datetime.now(tz=timezone.utc).timestamp())
         scores: list[WalletScore] = []
+        scored_wallets = 0
+        skipped_rate_limited = 0
         for index, address in enumerate(refresh_addresses):
             try:
-                fills = await self._fetch_fills_with_backoff(address)
+                fills = await self._fetch_fills_for_address(address)
             except asyncio.CancelledError:
                 raise
+            except WalletTrackerRateLimitSkip as exc:
+                skipped_rate_limited += 1
+                LOGGER.warning("Wallet tracker rate limited for %s; skipping address for this cycle", exc.address)
+                if index < len(refresh_addresses) - 1:
+                    await self._pause(self._inter_wallet_delay_seconds())
+                continue
             except Exception as exc:
                 LOGGER.warning("Wallet tracker failed to refresh %s: %s", address, exc)
                 if index < len(refresh_addresses) - 1:
-                    await self._pause(WALLET_REFRESH_DELAY_SECONDS)
+                    await self._pause(self._inter_wallet_delay_seconds())
                 continue
 
             resolved_trades = self._resolved_outcome_trades(fills)
             trade_count = len(resolved_trades)
             if trade_count == 0:
                 if index < len(refresh_addresses) - 1:
-                    await self._pause(WALLET_REFRESH_DELAY_SECONDS)
+                    await self._pause(self._inter_wallet_delay_seconds())
                 continue
 
             win_count = sum(1 for trade in resolved_trades.values() if trade.pnl_usdh > 0)
@@ -102,11 +130,32 @@ class WalletTracker:
                     last_updated_ts=now_ts,
                 )
             )
+            scored_wallets += 1
 
             if index < len(refresh_addresses) - 1:
-                await self._pause(WALLET_REFRESH_DELAY_SECONDS)
+                await self._pause(self._inter_wallet_delay_seconds())
 
-        self.storage.upsert_wallet_scores(scores)
+        if scores:
+            self.storage.upsert_wallet_scores(scores)
+
+        LOGGER.info(
+            "Wallet tracker %s refresh scored %d wallets and skipped %d due to 429",
+            cycle_name,
+            scored_wallets,
+            skipped_rate_limited,
+        )
+
+    async def _refresh_startup_addresses_once(self) -> bool:
+        addresses = self.storage.list_initial_tracked_wallet_addresses(limit=WALLET_STARTUP_INITIAL_ADDRESSES)
+        if not addresses:
+            if not self._startup_wait_logged:
+                LOGGER.info("Wallet tracker startup waiting for tracked wallet addresses")
+                self._startup_wait_logged = True
+            return False
+
+        self._startup_wait_logged = False
+        await self.refresh_once(addresses=addresses, cycle_name="startup")
+        return True
 
     def _select_addresses_for_refresh(self, addresses: list[str]) -> list[str]:
         unique_addresses = sorted({address for address in addresses if address}, key=str.lower)
@@ -129,26 +178,19 @@ class WalletTracker:
         )
         return selected
 
-    async def _fetch_fills_with_backoff(self, address: str) -> list[dict]:
-        delay_seconds = WALLET_REFRESH_BACKOFF_BASE_SECONDS
-        for attempt in range(1, WALLET_REFRESH_MAX_RETRIES + 1):
-            try:
-                return await self.adapter.fetch_user_fills_by_time(address)
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                if not self._is_rate_limit_error(exc) or attempt == WALLET_REFRESH_MAX_RETRIES:
-                    raise
-                LOGGER.warning(
-                    "Wallet tracker rate limited for %s on attempt %d/%d; retrying in %.1fs",
-                    address,
-                    attempt,
-                    WALLET_REFRESH_MAX_RETRIES,
-                    delay_seconds,
-                )
-                await self._pause(delay_seconds)
-                delay_seconds = min(delay_seconds * 2, WALLET_REFRESH_BACKOFF_CAP_SECONDS)
-        raise RuntimeError(f"Wallet tracker exhausted retries for {address}")
+    async def _fetch_fills_for_address(self, address: str) -> list[dict]:
+        try:
+            return await self.adapter.fetch_user_fills_by_time(address)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if self._is_rate_limit_error(exc):
+                raise WalletTrackerRateLimitSkip(address) from exc
+            raise
+
+    @staticmethod
+    def _inter_wallet_delay_seconds() -> float:
+        return random.uniform(WALLET_REFRESH_DELAY_MIN_SECONDS, WALLET_REFRESH_DELAY_MAX_SECONDS)
 
     async def _pause(self, seconds: float) -> None:
         if seconds <= 0 or self._stop_event.is_set():

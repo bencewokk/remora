@@ -428,6 +428,32 @@ class Storage:
             ).fetchall()
             return [str(row["address"]) for row in rows]
 
+    def list_initial_tracked_wallet_addresses(self, limit: int = 5) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT address
+                FROM (
+                    SELECT trigger_address AS address, MIN(timestamp) AS first_seen_at
+                    FROM book_events
+                    WHERE trigger_address IS NOT NULL AND trigger_address != ''
+                    GROUP BY trigger_address
+
+                    UNION ALL
+
+                    SELECT trigger_address AS address, MIN(timestamp) AS first_seen_at
+                    FROM perp_book_events
+                    WHERE trigger_address IS NOT NULL AND trigger_address != ''
+                    GROUP BY trigger_address
+                ) AS first_seen
+                GROUP BY address
+                ORDER BY MIN(first_seen_at) ASC, LOWER(address) ASC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+            return [str(row["address"]) for row in rows]
+
     def list_wallet_scores(self) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(
@@ -562,6 +588,21 @@ class Storage:
                  AND latest.max_timestamp = current.timestamp
                 """
             ).fetchall()
+
+    def latest_perp_mark(self, market_id: str, asset_id: int) -> sqlite3.Row | None:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT market_id, asset_id, coin, timestamp,
+                       best_bid, best_ask, mid_price,
+                       funding_rate, open_interest
+                FROM perp_book_events
+                WHERE market_id = ? AND asset_id = ?
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (market_id, asset_id),
+            ).fetchone()
 
     def insert_order_intent(self, order: OrderIntent, status: str, details: dict | None = None) -> int:
         payload = details or {}

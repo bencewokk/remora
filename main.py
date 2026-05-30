@@ -71,27 +71,47 @@ async def perp_signal_handler(
                 LOGGER.info("Perp risk manager rejected signal for market %s", signal.market_id)
                 continue
 
-            mid_price = signal.details.get("mid_price")
-            if not isinstance(mid_price, (int, float)) or float(mid_price) <= 0:
-                LOGGER.info("Skipping perp signal without mid price for market %s", signal.market_id)
+            signal_mid_price = signal.details.get("mid_price")
+            latest_mark = executor.storage.latest_perp_mark(signal.market_id, signal.asset_id)
+            latest_mid_price = None
+            if latest_mark is not None and latest_mark["mid_price"] is not None:
+                latest_mid_price = float(latest_mark["mid_price"])
+
+            if latest_mid_price is None or latest_mid_price <= 0:
+                LOGGER.info(
+                    "Skipping perp signal without latest snapshot mid price for market %s (signal mid price=%s)",
+                    signal.market_id,
+                    signal_mid_price,
+                )
                 continue
 
-            price = float(mid_price) * (1.001 if signal.side == "long" else 0.999)
+            price = latest_mid_price * (1.001 if signal.side == "long" else 0.999)
             market = discovery.get_market(signal.coin)
             if market is None:
                 market = PerpMarket(
                     market_id=signal.market_id,
                     coin=signal.coin,
                     asset_id=signal.asset_id,
-                    mark_price=float(mid_price),
-                    funding_rate=float(signal.details.get("funding_rate", 0.0)),
-                    open_interest=float(signal.details.get("open_interest", 0.0)),
+                    mark_price=latest_mid_price,
+                    funding_rate=float(
+                        latest_mark["funding_rate"] if latest_mark is not None and latest_mark["funding_rate"] is not None else signal.details.get("funding_rate", 0.0)
+                    ),
+                    open_interest=float(
+                        latest_mark["open_interest"] if latest_mark is not None and latest_mark["open_interest"] is not None else signal.details.get("open_interest", 0.0)
+                    ),
                 )
+            LOGGER.info(
+                "Perp signal pricing source for %s uses latest snapshot mid_price=%.4f (signal mid price=%s)",
+                signal.market_id,
+                latest_mid_price,
+                signal_mid_price,
+            )
             result = await executor.place_perp_limit_order(
                 market=market,
                 side="buy" if signal.side == "long" else "sell",
                 size_usdh=config.follow_size_usdh,
                 limit_price=price,
+                source_mid_price=latest_mid_price,
                 signal_id=signal.signal_id,
             )
             LOGGER.info("Placed perp %s order for %s at %.4f via %s", signal.side, signal.market_id, price, result.status)

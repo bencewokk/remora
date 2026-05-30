@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from uuid import uuid4
 
 from config import Config
 from .adapter import HyperliquidAdapter
 from .models import OrderIntent, OrderResult, PerpMarket
 from .storage import Storage
+
+LOGGER = logging.getLogger(__name__)
 
 
 class OrderExecutor:
@@ -62,9 +65,19 @@ class OrderExecutor:
         side: str,
         size_usdh: float,
         limit_price: float,
+        source_mid_price: float | None = None,
         signal_id: int | None = None,
     ) -> OrderResult:
         self._validate_perp(limit_price, size_usdh)
+        LOGGER.info(
+            "Perp order placement inputs market=%s coin=%s side=%s source_mid_price=%s limit_price=%.4f size_usdh=%.2f",
+            market.market_id,
+            market.coin,
+            side,
+            f"{source_mid_price:.4f}" if source_mid_price is not None else "n/a",
+            limit_price,
+            size_usdh,
+        )
         quantity = self._perp_quantity_for_notional(size_usdh, limit_price)
         intent = OrderIntent(
             market_id=market.market_id,
