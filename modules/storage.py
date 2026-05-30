@@ -167,6 +167,17 @@ class Storage:
                     updated_at TEXT NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS resolved_markets (
+                    market_id TEXT PRIMARY KEY,
+                    resolved_at TEXT NOT NULL,
+                    winning_side TEXT,
+                    settlement_price REAL,
+                    details_json TEXT NOT NULL DEFAULT '{}'
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_resolved_markets_resolved_at
+                ON resolved_markets (resolved_at);
+
                 CREATE TABLE IF NOT EXISTS wallet_scores (
                     address TEXT PRIMARY KEY,
                     trade_count INTEGER NOT NULL,
@@ -528,6 +539,24 @@ class Storage:
                 (limit,),
             ).fetchall()
 
+    def list_order_history(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT orders.id, orders.market_id, orders.asset_id, orders.side, orders.size_usdh,
+                       orders.quantity, orders.price, orders.client_order_id, orders.order_id,
+                       orders.status, orders.filled_price, orders.paper_trade, orders.signal_id,
+                       orders.created_at, orders.updated_at, orders.details_json AS order_details_json,
+                       whale_signals.side AS signal_side,
+                       whale_signals.trigger_type AS signal_trigger_type,
+                       whale_signals.wallet_bonus_applied AS signal_wallet_bonus_applied,
+                       whale_signals.details_json AS signal_details_json
+                FROM orders
+                LEFT JOIN whale_signals ON whale_signals.id = orders.signal_id
+                ORDER BY orders.created_at ASC, orders.id ASC
+                """
+            ).fetchall()
+
     def list_open_orders(self) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(
@@ -556,6 +585,27 @@ class Storage:
                 LIMIT ?
                 """,
                 (limit,),
+            ).fetchall()
+
+    def list_perp_order_history(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT perp_orders.id, perp_orders.market_id, perp_orders.asset_id, perp_orders.side,
+                       perp_orders.size_usdh, perp_orders.quantity, perp_orders.price,
+                       perp_orders.client_order_id, perp_orders.order_id, perp_orders.status,
+                       perp_orders.filled_price, perp_orders.paper_trade, perp_orders.signal_id,
+                       perp_orders.created_at, perp_orders.updated_at,
+                       perp_orders.details_json AS order_details_json,
+                       perp_whale_signals.coin AS signal_coin,
+                       perp_whale_signals.side AS signal_side,
+                       perp_whale_signals.trigger_type AS signal_trigger_type,
+                       perp_whale_signals.wallet_bonus_applied AS signal_wallet_bonus_applied,
+                       perp_whale_signals.details_json AS signal_details_json
+                FROM perp_orders
+                LEFT JOIN perp_whale_signals ON perp_whale_signals.id = perp_orders.signal_id
+                ORDER BY perp_orders.created_at ASC, perp_orders.id ASC
+                """
             ).fetchall()
 
     def list_open_perp_orders(self) -> list[sqlite3.Row]:
@@ -593,6 +643,24 @@ class Storage:
                 """
             ).fetchall()
 
+    def list_prediction_mark_history(self, market_keys: set[tuple[str, int]] | list[tuple[str, int]]) -> list[sqlite3.Row]:
+        if not market_keys:
+            return []
+        clauses = " OR ".join("(market_id = ? AND asset_id = ?)" for _ in market_keys)
+        params: list[str | int] = []
+        for market_id, asset_id in market_keys:
+            params.extend((market_id, asset_id))
+        with self.connect() as connection:
+            return connection.execute(
+                f"""
+                SELECT market_id, asset_id, timestamp, mid_price
+                FROM book_events
+                WHERE mid_price IS NOT NULL AND ({clauses})
+                ORDER BY market_id ASC, asset_id ASC, timestamp ASC
+                """,
+                params,
+            ).fetchall()
+
     def latest_perp_marks(self) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(
@@ -610,6 +678,24 @@ class Storage:
                  AND latest.asset_id = current.asset_id
                  AND latest.max_timestamp = current.timestamp
                 """
+            ).fetchall()
+
+    def list_perp_mark_history(self, market_keys: set[tuple[str, int]] | list[tuple[str, int]]) -> list[sqlite3.Row]:
+        if not market_keys:
+            return []
+        clauses = " OR ".join("(market_id = ? AND asset_id = ?)" for _ in market_keys)
+        params: list[str | int] = []
+        for market_id, asset_id in market_keys:
+            params.extend((market_id, asset_id))
+        with self.connect() as connection:
+            return connection.execute(
+                f"""
+                SELECT market_id, asset_id, coin, timestamp, mid_price
+                FROM perp_book_events
+                WHERE mid_price IS NOT NULL AND ({clauses})
+                ORDER BY market_id ASC, asset_id ASC, timestamp ASC
+                """,
+                params,
             ).fetchall()
 
     def latest_perp_mark(self, market_id: str, asset_id: int) -> sqlite3.Row | None:
@@ -720,6 +806,39 @@ class Storage:
                     client_order_id,
                 ),
             )
+
+    def upsert_resolved_market(
+        self,
+        market_id: str,
+        resolved_at: str,
+        winning_side: str | None = None,
+        settlement_price: float | None = None,
+        details: dict | None = None,
+    ) -> None:
+        payload = details or {}
+        with self.connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO resolved_markets (market_id, resolved_at, winning_side, settlement_price, details_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(market_id) DO UPDATE SET
+                    resolved_at = excluded.resolved_at,
+                    winning_side = excluded.winning_side,
+                    settlement_price = excluded.settlement_price,
+                    details_json = excluded.details_json
+                """,
+                (market_id, resolved_at, winning_side, settlement_price, json.dumps(payload)),
+            )
+
+    def list_resolved_markets(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT market_id, resolved_at, winning_side, settlement_price, details_json
+                FROM resolved_markets
+                ORDER BY resolved_at DESC, market_id ASC
+                """
+            ).fetchall()
 
     def open_market_ids(self) -> set[str]:
         with self.connect() as connection:

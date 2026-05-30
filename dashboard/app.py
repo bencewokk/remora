@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 from bisect import bisect_right
 from collections import defaultdict, deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import sys
 import time
@@ -43,6 +43,7 @@ SIGNAL_QUALITY_TRIGGER_TYPES = (
     "funding_divergence",
 )
 OPEN_ORDER_STATUSES = ("pending", "submitted", "paper_filled", "filled")
+CLOSED_ORDER_STATUSES = ("paper_settled", "settled")
 _PREDICTION_MARKET_META_CACHE: dict[str, Any] = {"loaded_at": 0.0, "data": {}}
 _WHALE_SPOTLIGHT_CACHE: dict[str, Any] = {"loaded_at": 0.0, "addresses": tuple(), "data": {}}
 
@@ -93,6 +94,61 @@ def _parse_expiry_timestamp(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed
+
+
+def _json_object(value: str | None) -> dict[str, Any]:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _to_iso(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.astimezone(timezone.utc).replace(microsecond=0).isoformat()
+
+
+def _hours_between(start: datetime | None, end: datetime | None) -> float | None:
+    if start is None or end is None:
+        return None
+    return round(max((end - start).total_seconds(), 0.0) / 3600.0, 1)
+
+
+def _positive_peak(values: list[float]) -> float:
+    positive_values = [value for value in values if value > 0]
+    if not positive_values:
+        return 0.0
+    return min(positive_values)
+
+
+def _ledger_starting_cash(storage: Storage) -> float:
+    prediction_ledger = storage.get_ledger_state()
+    perp_ledger = storage.get_perp_ledger_state()
+    peak_baseline = _positive_peak(
+        [
+            float(prediction_ledger["peak_equity"] or 0.0),
+            float(perp_ledger["peak_equity"] or 0.0),
+        ]
+    )
+    if peak_baseline > 0:
+        return peak_baseline
+
+    configured_starting_cash = max(float(Config.from_env().starting_cash_usdh), 0.0)
+    if configured_starting_cash > 0:
+        return configured_starting_cash
+
+    return _positive_peak(
+        [
+            float(prediction_ledger["equity"] or 0.0),
+            float(perp_ledger["equity"] or 0.0),
+            float(prediction_ledger["cash_balance"] or 0.0),
+            float(perp_ledger["cash_balance"] or 0.0),
+        ]
+    )
 
 
 async def _load_prediction_market_meta() -> dict[str, dict[str, Any]]:
@@ -692,6 +748,490 @@ def _portfolio_summary(prediction_positions: list[dict], perp_positions: list[di
     }
 
 
+def _resolved_market_map(storage: Storage) -> dict[str, dict[str, Any]]:
+    resolved: dict[str, dict[str, Any]] = {}
+    for row in storage.list_resolved_markets():
+        details = _json_object(row["details_json"])
+        resolved_at = _parse_iso_timestamp(str(row["resolved_at"]))
+        winning_side = str(row["winning_side"] or details.get("winning_side") or "").upper() or None
+        settlement_price = row["settlement_price"]
+        if settlement_price is None:
+            settlement_price = details.get("settlement_price")
+        resolved[str(row["market_id"])] = {
+            "resolved_at": resolved_at,
+            "winning_side": winning_side,
+            "settlement_price": float(settlement_price) if isinstance(settlement_price, (int, float)) else None,
+        }
+    return resolved
+
+
+def _build_mark_series_from_rows(rows: list[Any]) -> dict[tuple[str, int], dict[str, list[float]]]:
+    series: dict[tuple[str, int], dict[str, list[float]]] = defaultdict(lambda: {"times": [], "mid_prices": []})
+    for row in rows:
+        timestamp = _parse_iso_timestamp(str(row["timestamp"]))
+        if timestamp is None or row["mid_price"] is None:
+            continue
+        key = (str(row["market_id"]), int(row["asset_id"]))
+        series[key]["times"].append(timestamp.timestamp())
+        series[key]["mid_prices"].append(float(row["mid_price"]))
+    return dict(series)
+
+
+def _latest_mid_at_or_before(series: dict[str, list[float]] | None, timestamp_seconds: float) -> float | None:
+    if not series:
+        return None
+    times = series["times"]
+    mid_prices = series["mid_prices"]
+    index = bisect_right(times, timestamp_seconds) - 1
+    if index < 0:
+        return None
+    return float(mid_prices[index])
+
+
+def _prediction_ledger_positions(storage: Storage, latest_marks: dict[tuple[str, int], dict]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    market_meta = _prediction_market_meta()
+    resolved_markets = _resolved_market_map(storage)
+    open_positions: list[dict[str, Any]] = []
+    closed_positions: list[dict[str, Any]] = []
+    histories: list[dict[str, Any]] = []
+    for row in storage.list_order_history():
+        market_id = str(row["market_id"])
+        asset_id = int(row["asset_id"])
+        status = str(row["status"])
+        created_at = _parse_iso_timestamp(str(row["created_at"]))
+        if created_at is None:
+            continue
+        updated_at = _parse_iso_timestamp(str(row["updated_at"])) or created_at
+        signal_details = _json_object(row["signal_details_json"])
+        order_details = _json_object(row["order_details_json"])
+        contract_side = str(row["signal_side"] or signal_details.get("contract_side") or signal_details.get("side") or "").upper() or "UNKNOWN"
+        entry_price = float(row["filled_price"] if row["filled_price"] is not None else row["price"])
+        quantity = float(row["quantity"])
+        trigger_type = str(row["signal_trigger_type"] or signal_details.get("trigger_type") or "")
+        wallet_bonus_applied = bool(row["signal_wallet_bonus_applied"]) if row["signal_wallet_bonus_applied"] is not None else bool(signal_details.get("wallet_bonus_applied"))
+        coin = signal_details.get("coin") if isinstance(signal_details.get("coin"), str) else None
+        meta = market_meta.get(market_id, {})
+        resolved_market = resolved_markets.get(market_id)
+        closed_at: datetime | None = None
+        exit_price: float | None = None
+        if resolved_market is not None and resolved_market.get("resolved_at") is not None:
+            closed_at = resolved_market["resolved_at"]
+            winning_side = resolved_market.get("winning_side")
+            settlement_price = resolved_market.get("settlement_price")
+            if winning_side in {"YES", "NO"} and contract_side in {"YES", "NO"}:
+                exit_price = 1.0 if winning_side == contract_side else 0.0
+            elif isinstance(settlement_price, (int, float)):
+                exit_price = float(settlement_price)
+        elif status in CLOSED_ORDER_STATUSES:
+            closed_at = updated_at
+            settlement_price = order_details.get("settlement_price")
+            winning_side = str(order_details.get("winning_side") or signal_details.get("winning_side") or "").upper()
+            if winning_side in {"YES", "NO"} and contract_side in {"YES", "NO"}:
+                exit_price = 1.0 if winning_side == contract_side else 0.0
+            elif isinstance(settlement_price, (int, float)):
+                exit_price = float(settlement_price)
+            else:
+                exit_price = float(row["filled_price"] if row["filled_price"] is not None else row["price"])
+
+        if closed_at is not None:
+            final_exit_price = entry_price if exit_price is None else exit_price
+            realized_pnl = quantity * (final_exit_price - entry_price)
+            closed_positions.append(
+                {
+                    "market_id": market_id,
+                    "coin": coin,
+                    "market_type": "prediction",
+                    "direction": contract_side,
+                    "entry_price": entry_price,
+                    "exit_price": final_exit_price,
+                    "size_usdh": float(row["size_usdh"]),
+                    "realized_pnl_usdh": realized_pnl,
+                    "opened_at": _to_iso(created_at),
+                    "closed_at": _to_iso(closed_at),
+                    "duration_hours": _hours_between(created_at, closed_at),
+                    "trigger_type": trigger_type,
+                    "wallet_bonus_applied": wallet_bonus_applied,
+                }
+            )
+            histories.append(
+                {
+                    "market_type": "prediction",
+                    "key": (market_id, asset_id),
+                    "opened_at": created_at,
+                    "closed_at": closed_at,
+                    "entry_price": entry_price,
+                    "quantity": quantity,
+                    "direction_sign": 1.0,
+                    "realized_pnl_usdh": realized_pnl,
+                }
+            )
+            continue
+
+        if status not in OPEN_ORDER_STATUSES:
+            continue
+
+        latest_mark = latest_marks.get((market_id, asset_id))
+        mark_price = latest_mark.get("mid_price") if latest_mark is not None else None
+        unrealized_pnl = quantity * (float(mark_price) - entry_price) if isinstance(mark_price, (int, float)) else None
+        open_positions.append(
+            {
+                "market_id": market_id,
+                "coin": coin,
+                "market_type": "prediction",
+                "direction": contract_side,
+                "entry_price": entry_price,
+                "mark_price": mark_price,
+                "size_usdh": float(row["size_usdh"]),
+                "unrealized_pnl_usdh": unrealized_pnl,
+                "opened_at": _to_iso(created_at),
+                "age_hours": _hours_between(created_at, datetime.now(tz=timezone.utc)),
+                "trigger_type": trigger_type,
+                "wallet_bonus_applied": wallet_bonus_applied,
+                "expiry": meta.get("expiry"),
+            }
+        )
+        histories.append(
+            {
+                "market_type": "prediction",
+                "key": (market_id, asset_id),
+                "opened_at": created_at,
+                "closed_at": None,
+                "entry_price": entry_price,
+                "quantity": quantity,
+                "direction_sign": 1.0,
+                "realized_pnl_usdh": 0.0,
+            }
+        )
+
+    open_positions.sort(key=lambda item: item["opened_at"] or "", reverse=True)
+    closed_positions.sort(key=lambda item: item["closed_at"] or "", reverse=True)
+    return open_positions, closed_positions, histories
+
+
+def _perp_direction_from_order_side(order_side: str) -> tuple[float, str]:
+    normalized = order_side.lower()
+    if normalized == "sell":
+        return -1.0, "short"
+    return 1.0, "long"
+
+
+def _perp_ledger_positions(storage: Storage, latest_marks: dict[tuple[str, int], dict]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    open_positions: list[dict[str, Any]] = []
+    closed_positions: list[dict[str, Any]] = []
+    histories: list[dict[str, Any]] = []
+    active_positions: dict[str, dict[str, Any]] = {}
+
+    for row in storage.list_perp_order_history():
+        market_id = str(row["market_id"])
+        asset_id = int(row["asset_id"])
+        status = str(row["status"])
+        created_at = _parse_iso_timestamp(str(row["created_at"]))
+        if created_at is None:
+            continue
+        updated_at = _parse_iso_timestamp(str(row["updated_at"])) or created_at
+        order_details = _json_object(row["order_details_json"])
+        signal_details = _json_object(row["signal_details_json"])
+        entry_price = float(row["filled_price"] if row["filled_price"] is not None else row["price"])
+        quantity = float(row["quantity"])
+        direction_sign, fallback_direction = _perp_direction_from_order_side(str(row["side"]))
+        direction = str(row["signal_side"] or signal_details.get("side") or fallback_direction)
+        active_position = active_positions.get(market_id)
+
+        if active_position is None:
+            position = {
+                "market_id": market_id,
+                "asset_id": asset_id,
+                "coin": str(row["signal_coin"] or order_details.get("coin") or signal_details.get("coin") or market_id),
+                "direction": direction,
+                "order_side": str(row["side"]).lower(),
+                "direction_sign": direction_sign,
+                "entry_price": entry_price,
+                "quantity": quantity,
+                "size_usdh": float(row["size_usdh"]),
+                "opened_at": created_at,
+                "trigger_type": str(row["signal_trigger_type"] or signal_details.get("trigger_type") or ""),
+                "wallet_bonus_applied": bool(row["signal_wallet_bonus_applied"]) if row["signal_wallet_bonus_applied"] is not None else bool(signal_details.get("wallet_bonus_applied")),
+            }
+            if status in CLOSED_ORDER_STATUSES:
+                exit_price_raw = order_details.get("settlement_price")
+                exit_price = float(exit_price_raw) if isinstance(exit_price_raw, (int, float)) else entry_price
+                realized_pnl = quantity * (exit_price - entry_price) * direction_sign
+                closed_positions.append(
+                    {
+                        "market_id": market_id,
+                        "coin": position["coin"],
+                        "market_type": "perp",
+                        "direction": direction,
+                        "entry_price": entry_price,
+                        "exit_price": exit_price,
+                        "size_usdh": float(row["size_usdh"]),
+                        "realized_pnl_usdh": realized_pnl,
+                        "opened_at": _to_iso(created_at),
+                        "closed_at": _to_iso(updated_at),
+                        "duration_hours": _hours_between(created_at, updated_at),
+                        "trigger_type": position["trigger_type"],
+                        "wallet_bonus_applied": position["wallet_bonus_applied"],
+                    }
+                )
+                histories.append(
+                    {
+                        "market_type": "perp",
+                        "key": (market_id, asset_id),
+                        "opened_at": created_at,
+                        "closed_at": updated_at,
+                        "entry_price": entry_price,
+                        "quantity": quantity,
+                        "direction_sign": direction_sign,
+                        "realized_pnl_usdh": realized_pnl,
+                    }
+                )
+            elif status in OPEN_ORDER_STATUSES:
+                active_positions[market_id] = position
+            continue
+
+        if str(row["side"]).lower() == active_position["order_side"]:
+            total_quantity = active_position["quantity"] + quantity
+            if total_quantity > 0:
+                active_position["entry_price"] = (
+                    (active_position["entry_price"] * active_position["quantity"]) + (entry_price * quantity)
+                ) / total_quantity
+                active_position["quantity"] = total_quantity
+                active_position["size_usdh"] += float(row["size_usdh"])
+            if status in CLOSED_ORDER_STATUSES:
+                exit_price_raw = order_details.get("settlement_price")
+                exit_price = float(exit_price_raw) if isinstance(exit_price_raw, (int, float)) else active_position["entry_price"]
+                realized_pnl = active_position["quantity"] * (exit_price - active_position["entry_price"]) * active_position["direction_sign"]
+                closed_positions.append(
+                    {
+                        "market_id": market_id,
+                        "coin": active_position["coin"],
+                        "market_type": "perp",
+                        "direction": active_position["direction"],
+                        "entry_price": active_position["entry_price"],
+                        "exit_price": exit_price,
+                        "size_usdh": active_position["size_usdh"],
+                        "realized_pnl_usdh": realized_pnl,
+                        "opened_at": _to_iso(active_position["opened_at"]),
+                        "closed_at": _to_iso(updated_at),
+                        "duration_hours": _hours_between(active_position["opened_at"], updated_at),
+                        "trigger_type": active_position["trigger_type"],
+                        "wallet_bonus_applied": active_position["wallet_bonus_applied"],
+                    }
+                )
+                histories.append(
+                    {
+                        "market_type": "perp",
+                        "key": (market_id, asset_id),
+                        "opened_at": active_position["opened_at"],
+                        "closed_at": updated_at,
+                        "entry_price": active_position["entry_price"],
+                        "quantity": active_position["quantity"],
+                        "direction_sign": active_position["direction_sign"],
+                        "realized_pnl_usdh": realized_pnl,
+                    }
+                )
+                del active_positions[market_id]
+            continue
+
+        exit_price_raw = order_details.get("settlement_price")
+        exit_price = float(exit_price_raw) if isinstance(exit_price_raw, (int, float)) else entry_price
+        realized_pnl = active_position["quantity"] * (exit_price - active_position["entry_price"]) * active_position["direction_sign"]
+        closed_positions.append(
+            {
+                "market_id": market_id,
+                "coin": active_position["coin"],
+                "market_type": "perp",
+                "direction": active_position["direction"],
+                "entry_price": active_position["entry_price"],
+                "exit_price": exit_price,
+                "size_usdh": active_position["size_usdh"],
+                "realized_pnl_usdh": realized_pnl,
+                "opened_at": _to_iso(active_position["opened_at"]),
+                "closed_at": _to_iso(created_at),
+                "duration_hours": _hours_between(active_position["opened_at"], created_at),
+                "trigger_type": active_position["trigger_type"],
+                "wallet_bonus_applied": active_position["wallet_bonus_applied"],
+            }
+        )
+        histories.append(
+            {
+                "market_type": "perp",
+                "key": (market_id, active_position["asset_id"]),
+                "opened_at": active_position["opened_at"],
+                "closed_at": created_at,
+                "entry_price": active_position["entry_price"],
+                "quantity": active_position["quantity"],
+                "direction_sign": active_position["direction_sign"],
+                "realized_pnl_usdh": realized_pnl,
+            }
+        )
+        del active_positions[market_id]
+
+    now = datetime.now(tz=timezone.utc)
+    for active_position in active_positions.values():
+        latest_mark = latest_marks.get((active_position["market_id"], active_position["asset_id"]))
+        mark_price = latest_mark.get("mid_price") if latest_mark is not None else None
+        unrealized_pnl = None
+        if isinstance(mark_price, (int, float)):
+            unrealized_pnl = active_position["quantity"] * (float(mark_price) - active_position["entry_price"]) * active_position["direction_sign"]
+        open_positions.append(
+            {
+                "market_id": active_position["market_id"],
+                "coin": active_position["coin"],
+                "market_type": "perp",
+                "direction": active_position["direction"],
+                "entry_price": active_position["entry_price"],
+                "mark_price": mark_price,
+                "size_usdh": active_position["size_usdh"],
+                "unrealized_pnl_usdh": unrealized_pnl,
+                "opened_at": _to_iso(active_position["opened_at"]),
+                "age_hours": _hours_between(active_position["opened_at"], now),
+                "trigger_type": active_position["trigger_type"],
+                "wallet_bonus_applied": active_position["wallet_bonus_applied"],
+                "expiry": None,
+            }
+        )
+        histories.append(
+            {
+                "market_type": "perp",
+                "key": (active_position["market_id"], active_position["asset_id"]),
+                "opened_at": active_position["opened_at"],
+                "closed_at": None,
+                "entry_price": active_position["entry_price"],
+                "quantity": active_position["quantity"],
+                "direction_sign": active_position["direction_sign"],
+                "realized_pnl_usdh": 0.0,
+            }
+        )
+
+    open_positions.sort(key=lambda item: item["opened_at"] or "", reverse=True)
+    closed_positions.sort(key=lambda item: item["closed_at"] or "", reverse=True)
+    return open_positions, closed_positions, histories
+
+
+def _hour_floor(value: datetime) -> datetime:
+    return value.astimezone(timezone.utc).replace(minute=0, second=0, microsecond=0)
+
+
+def _ledger_equity_curve(storage: Storage, starting_cash_usdh: float, histories: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not histories:
+        now = _hour_floor(datetime.now(tz=timezone.utc))
+        return [{"timestamp": _to_iso(now), "equity": starting_cash_usdh}]
+
+    prediction_keys = {history["key"] for history in histories if history["market_type"] == "prediction"}
+    perp_keys = {history["key"] for history in histories if history["market_type"] == "perp"}
+    prediction_series = _build_mark_series_from_rows(storage.list_prediction_mark_history(prediction_keys))
+    perp_series = _build_mark_series_from_rows(storage.list_perp_mark_history(perp_keys))
+
+    mark_timestamps: list[datetime] = []
+    for series in [*prediction_series.values(), *perp_series.values()]:
+        if not series["times"]:
+            continue
+        mark_timestamps.append(datetime.fromtimestamp(series["times"][-1], tz=timezone.utc))
+
+    start_at = _hour_floor(min(history["opened_at"] for history in histories))
+    end_candidates = [datetime.now(tz=timezone.utc)]
+    end_candidates.extend(mark_timestamps)
+    end_candidates.extend(history["closed_at"] for history in histories if history["closed_at"] is not None)
+    end_at = _hour_floor(max(end_candidates))
+
+    points: list[dict[str, Any]] = []
+    cursor = start_at
+    while cursor <= end_at:
+        point_ts = cursor.timestamp()
+        realized_pnl = sum(
+            float(history["realized_pnl_usdh"])
+            for history in histories
+            if history["closed_at"] is not None and history["closed_at"].timestamp() <= point_ts
+        )
+        unrealized_pnl = 0.0
+        for history in histories:
+            if history["opened_at"].timestamp() > point_ts:
+                continue
+            if history["closed_at"] is not None and history["closed_at"].timestamp() <= point_ts:
+                continue
+            mark_series = prediction_series.get(history["key"]) if history["market_type"] == "prediction" else perp_series.get(history["key"])
+            mark_price = _latest_mid_at_or_before(mark_series, point_ts)
+            if mark_price is None:
+                continue
+            if history["market_type"] == "prediction":
+                unrealized_pnl += float(history["quantity"]) * (mark_price - float(history["entry_price"]))
+            else:
+                unrealized_pnl += float(history["quantity"]) * (mark_price - float(history["entry_price"])) * float(history["direction_sign"])
+        points.append(
+            {
+                "timestamp": _to_iso(cursor),
+                "equity": starting_cash_usdh + realized_pnl + unrealized_pnl,
+            }
+        )
+        cursor += timedelta(hours=1)
+
+    return points
+
+
+def _daily_pnl_from_equity_curve(equity_curve: list[dict[str, Any]]) -> float:
+    if not equity_curve:
+        return 0.0
+    latest_point = equity_curve[-1]
+    latest_timestamp = _parse_iso_timestamp(str(latest_point["timestamp"]))
+    if latest_timestamp is None:
+        return 0.0
+    cutoff = latest_timestamp - timedelta(hours=24)
+    baseline_point = equity_curve[0]
+    for point in equity_curve:
+        point_ts = _parse_iso_timestamp(str(point["timestamp"]))
+        if point_ts is None:
+            continue
+        if point_ts <= cutoff:
+            baseline_point = point
+        else:
+            break
+    return float(latest_point["equity"]) - float(baseline_point["equity"])
+
+
+def _ledger_payload(storage: Storage) -> dict[str, Any]:
+    prediction_marks = _latest_prediction_marks(storage)
+    perp_marks = _latest_perp_marks(storage)
+    prediction_open, prediction_closed, prediction_histories = _prediction_ledger_positions(storage, prediction_marks)
+    perp_open, perp_closed, perp_histories = _perp_ledger_positions(storage, perp_marks)
+    open_positions = sorted([*prediction_open, *perp_open], key=lambda item: item["opened_at"] or "", reverse=True)
+    closed_positions = sorted([*prediction_closed, *perp_closed], key=lambda item: item["closed_at"] or "", reverse=True)
+    starting_cash_usdh = _ledger_starting_cash(storage)
+    realized_pnl_usdh = sum(float(position["realized_pnl_usdh"]) for position in closed_positions)
+    unrealized_pnl_usdh = sum(float(position["unrealized_pnl_usdh"] or 0.0) for position in open_positions)
+    total_equity_usdh = starting_cash_usdh + realized_pnl_usdh + unrealized_pnl_usdh
+    winning_positions = [position for position in closed_positions if float(position["realized_pnl_usdh"]) > 0]
+    losing_positions = [position for position in closed_positions if float(position["realized_pnl_usdh"]) < 0]
+    gross_profit = sum(float(position["realized_pnl_usdh"]) for position in winning_positions)
+    gross_loss = sum(float(position["realized_pnl_usdh"]) for position in losing_positions)
+    equity_curve = _ledger_equity_curve(storage, starting_cash_usdh, [*prediction_histories, *perp_histories])
+    closed_count = len(closed_positions)
+    total_return_pct = (total_equity_usdh - starting_cash_usdh) / starting_cash_usdh * 100 if starting_cash_usdh > 0 else 0.0
+
+    return {
+        "summary": {
+            "starting_cash_usdh": starting_cash_usdh,
+            "realized_pnl_usdh": realized_pnl_usdh,
+            "unrealized_pnl_usdh": unrealized_pnl_usdh,
+            "total_equity_usdh": total_equity_usdh,
+            "total_return_pct": total_return_pct,
+            "closed_positions": closed_count,
+            "winning_positions": len(winning_positions),
+            "losing_positions": len(losing_positions),
+            "win_rate_pct": (len(winning_positions) / closed_count * 100) if closed_count else 0.0,
+            "avg_win_usdh": (gross_profit / len(winning_positions)) if winning_positions else 0.0,
+            "avg_loss_usdh": (gross_loss / len(losing_positions)) if losing_positions else 0.0,
+            "profit_factor": (gross_profit / abs(gross_loss)) if gross_loss < 0 else 0.0,
+            "best_trade_usdh": max((float(position["realized_pnl_usdh"]) for position in closed_positions), default=0.0),
+            "worst_trade_usdh": min((float(position["realized_pnl_usdh"]) for position in closed_positions), default=0.0),
+            "daily_pnl_usdh": _daily_pnl_from_equity_curve(equity_curve),
+        },
+        "equity_curve": equity_curve,
+        "closed_positions": closed_positions,
+        "open_positions": open_positions,
+    }
+
+
 def _wallet_address_key(address: str) -> str:
     return address.strip().lower()
 
@@ -1043,6 +1583,16 @@ def _wallet_clusters(storage: Storage, window_seconds: int = CLUSTER_WINDOW_SECO
 @app.get("/api/pnl-series")
 def pnl_series() -> object:
     return jsonify(_pnl_series(get_storage()))
+
+
+@app.get("/ledger")
+def ledger() -> str:
+    return render_template("ledger.html")
+
+
+@app.get("/api/ledger")
+def ledger_api() -> object:
+    return jsonify(_ledger_payload(get_storage()))
 
 
 @app.get("/clusters")

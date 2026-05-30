@@ -1,0 +1,618 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remora Trading Ledger</title>
+  <style>
+    :root {
+      --bg: #0a1016;
+      --panel: rgba(20, 30, 40, 0.92);
+      --panel-soft: rgba(24, 36, 49, 0.96);
+      --card: rgba(28, 40, 54, 0.95);
+      --panel-border: rgba(122, 145, 170, 0.18);
+      --panel-border-strong: rgba(122, 145, 170, 0.28);
+      --text: #ebf2fa;
+      --muted: #93a4b8;
+      --green: #37d67a;
+      --yellow: #f7c948;
+      --red: #f97066;
+      --blue: #4da3ff;
+      --teal: #43c6ac;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background:
+        radial-gradient(circle at top, rgba(38, 71, 109, 0.5) 0%, transparent 38%),
+        linear-gradient(180deg, #0f1720 0%, var(--bg) 58%);
+      color: var(--text);
+    }
+    header {
+      padding: 26px 28px 14px;
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    header h1 { margin: 0; font-size: 30px; }
+    header p { margin: 6px 0 0; color: var(--muted); max-width: 760px; }
+    .header-meta {
+      display: flex;
+      flex-direction: column;
+      align-items: flex-end;
+      gap: 10px;
+    }
+    .nav-links {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .nav-link {
+      text-decoration: none;
+      color: var(--muted);
+      border: 1px solid rgba(122, 145, 170, 0.22);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      background: rgba(10, 16, 22, 0.58);
+    }
+    .nav-link:hover,
+    .nav-link.active {
+      color: var(--text);
+      border-color: rgba(122, 145, 170, 0.38);
+      background: rgba(77, 163, 255, 0.12);
+    }
+    .last-updated {
+      color: var(--muted);
+      font-size: 13px;
+      white-space: nowrap;
+      padding-top: 8px;
+    }
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      padding: 0 24px 16px;
+    }
+    .metric-card,
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 18px;
+      box-shadow: 0 16px 42px rgba(0, 0, 0, 0.2);
+      backdrop-filter: blur(8px);
+    }
+    .metric-card { padding: 16px 18px; }
+    .metric-label {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+    .metric-value {
+      font-size: 30px;
+      font-weight: 700;
+      margin: 8px 0 4px;
+    }
+    .metric-detail {
+      color: var(--muted);
+      font-size: 13px;
+      margin-top: 4px;
+    }
+    .metric-green { color: var(--green); }
+    .metric-red { color: var(--red); }
+    .metric-yellow { color: var(--yellow); }
+    .metric-blue { color: var(--blue); }
+    .panel {
+      margin: 0 24px 18px;
+      padding: 18px;
+    }
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 14px;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+    .panel h2 { margin: 0; font-size: 18px; }
+    .panel-subtitle { color: var(--muted); font-size: 13px; margin-top: 4px; }
+    .chart-wrap {
+      position: relative;
+      height: 320px;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(147, 164, 184, 0.12);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      user-select: none;
+    }
+    th.sortable { cursor: pointer; }
+    th.sortable:hover { color: var(--text); }
+    .sort-indicator { color: var(--blue); margin-left: 4px; }
+    .mono { font-family: Consolas, monospace; }
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid rgba(147, 164, 184, 0.25);
+    }
+    .badge-on { color: var(--green); border-color: rgba(55, 214, 122, 0.4); }
+    .badge-off { color: var(--muted); }
+    .badge-yes { color: var(--green); border-color: rgba(55, 214, 122, 0.4); }
+    .badge-no { color: var(--red); border-color: rgba(249, 112, 102, 0.4); }
+    .badge-long { color: var(--green); border-color: rgba(55, 214, 122, 0.4); }
+    .badge-short { color: var(--red); border-color: rgba(249, 112, 102, 0.4); }
+    .muted { color: var(--muted); }
+    .table-row-profit {
+      background: linear-gradient(180deg, rgba(55, 214, 122, 0.08), rgba(28, 40, 54, 0.04));
+    }
+    .table-row-loss {
+      background: linear-gradient(180deg, rgba(249, 112, 102, 0.08), rgba(28, 40, 54, 0.04));
+    }
+    .market-cell {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .market-secondary {
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .empty-state {
+      color: var(--muted);
+      font-size: 14px;
+      padding: 10px 0;
+    }
+    @media (max-width: 1200px) {
+      .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+    @media (max-width: 800px) {
+      header { flex-direction: column; }
+      .summary-grid { grid-template-columns: 1fr; }
+      .header-meta { align-items: flex-start; }
+      .panel { overflow-x: auto; }
+      table { min-width: 900px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>Remora Trading Ledger</h1>
+      <p>Portfolio equity, realized and unrealized PnL, and reconstructed closed and open paper positions across prediction and perp markets.</p>
+    </div>
+    <div class="header-meta">
+      <nav class="nav-links" aria-label="Ledger navigation">
+        <a class="nav-link" href="/">Dashboard</a>
+        <a class="nav-link" href="/clusters">Cluster View</a>
+        <a class="nav-link active" href="/ledger">Ledger</a>
+      </nav>
+      <div class="last-updated" id="last-updated">Waiting for refresh…</div>
+    </div>
+  </header>
+
+  <section class="summary-grid" id="summary-row-one"></section>
+  <section class="summary-grid" id="summary-row-two"></section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Equity Curve</h2>
+        <div class="panel-subtitle">Hourly mark-to-market portfolio value using stored book-event mid prices and realized close-outs.</div>
+      </div>
+    </div>
+    <div class="chart-wrap">
+      <canvas id="equity-chart"></canvas>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Closed Positions</h2>
+        <div class="panel-subtitle">Sortable ledger of resolved prediction positions and reconstructed perp closes.</div>
+      </div>
+    </div>
+    <table id="closed-positions-table">
+      <thead>
+        <tr>
+          <th class="sortable" data-sort-key="market_label">Market</th>
+          <th class="sortable" data-sort-key="market_type">Type</th>
+          <th class="sortable" data-sort-key="direction">Direction</th>
+          <th class="sortable" data-sort-key="entry_price">Entry</th>
+          <th class="sortable" data-sort-key="exit_price">Exit</th>
+          <th class="sortable" data-sort-key="size_usdh">Size</th>
+          <th class="sortable" data-sort-key="realized_pnl_usdh">PnL</th>
+          <th class="sortable" data-sort-key="duration_hours">Duration</th>
+          <th class="sortable" data-sort-key="trigger_type">Signal</th>
+          <th class="sortable" data-sort-key="wallet_bonus_applied">Wallet Bonus</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <section class="panel">
+    <div class="panel-header">
+      <div>
+        <h2>Open Positions</h2>
+        <div class="panel-subtitle">Auto-refreshing paper positions marked against the latest stored mid price every 30 seconds.</div>
+      </div>
+    </div>
+    <table id="open-positions-table">
+      <thead>
+        <tr>
+          <th>Market</th>
+          <th>Type</th>
+          <th>Direction</th>
+          <th>Entry</th>
+          <th>Mark</th>
+          <th>Size</th>
+          <th>Unrealized PnL</th>
+          <th>Age</th>
+          <th>Expiry</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </section>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.3/chart.umd.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+    const AUTO_REFRESH_MS = 30000;
+
+    const state = {
+      payload: null,
+      closedSortKey: 'closed_at',
+      closedSortDir: 'desc',
+    };
+
+    let equityChart = null;
+
+    function formatMoney(value, signed = false) {
+      const amount = Number(value || 0);
+      if (!signed) return amount.toFixed(2);
+      return `${amount >= 0 ? '+' : ''}${amount.toFixed(2)}`;
+    }
+
+    function formatPercent(value, signed = false) {
+      const amount = Number(value || 0);
+      if (!signed) return `${amount.toFixed(1)}%`;
+      return `${amount >= 0 ? '+' : ''}${amount.toFixed(1)}%`;
+    }
+
+    function formatPrice(value) {
+      if (value === null || value === undefined) return 'n/a';
+      return Number(value).toFixed(4);
+    }
+
+    function formatIso(value) {
+      return value ? new Date(value).toLocaleString() : 'n/a';
+    }
+
+    function parsePredictionExpiry(value) {
+      if (!value) return null;
+      if (/^\d{8}-\d{4}$/.test(value)) {
+        const year = Number(value.slice(0, 4));
+        const month = Number(value.slice(4, 6)) - 1;
+        const day = Number(value.slice(6, 8));
+        const hour = Number(value.slice(9, 11));
+        const minute = Number(value.slice(11, 13));
+        return new Date(Date.UTC(year, month, day, hour, minute));
+      }
+      const parsed = new Date(value);
+      return Number.isNaN(parsed.getTime()) ? null : parsed;
+    }
+
+    function formatExpiryDisplay(position) {
+      if (position.market_type !== 'prediction') return 'Perpetual';
+      const parsed = parsePredictionExpiry(position.expiry);
+      if (!parsed) return position.expiry || 'n/a';
+      return parsed.toLocaleString();
+    }
+
+    function formatHours(value) {
+      if (value === null || value === undefined) return 'n/a';
+      return `${Number(value).toFixed(1)}h`;
+    }
+
+    function directionBadge(direction) {
+      const normalized = String(direction || '').toLowerCase();
+      let klass = 'badge-off';
+      if (normalized === 'yes') klass = 'badge-yes';
+      if (normalized === 'no') klass = 'badge-no';
+      if (normalized === 'long') klass = 'badge-long';
+      if (normalized === 'short') klass = 'badge-short';
+      return `<span class="badge ${klass}">${direction || 'n/a'}</span>`;
+    }
+
+    function marketLabel(position) {
+      if (position.coin) return position.coin;
+      return position.market_id;
+    }
+
+    function marketCell(position) {
+      const label = marketLabel(position);
+      if (label === position.market_id) {
+        return `<div class="market-cell"><strong>${label}</strong></div>`;
+      }
+      return `
+        <div class="market-cell">
+          <strong>${label}</strong>
+          <span class="market-secondary mono">${position.market_id}</span>
+        </div>
+      `;
+    }
+
+    function summaryClass(value, threshold = 0) {
+      if (Number(value || 0) > threshold) return 'metric-green';
+      if (Number(value || 0) < threshold) return 'metric-red';
+      return 'metric-yellow';
+    }
+
+    function renderSummary(payload) {
+      const summary = payload.summary || {};
+      const openPositions = payload.open_positions || [];
+      const predictionOpen = openPositions.filter(position => position.market_type === 'prediction').length;
+      const perpOpen = openPositions.filter(position => position.market_type === 'perp').length;
+      document.getElementById('summary-row-one').innerHTML = `
+        <article class="metric-card">
+          <div class="metric-label">Total Equity</div>
+          <div class="metric-value ${summaryClass(summary.total_equity_usdh, summary.starting_cash_usdh)}">${formatMoney(summary.total_equity_usdh)}</div>
+          <div class="metric-detail">Starting cash ${formatMoney(summary.starting_cash_usdh)} USDH</div>
+          <div class="metric-detail">Daily PnL ${formatMoney(summary.daily_pnl_usdh, true)} USDH</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Total Return</div>
+          <div class="metric-value ${summaryClass(summary.total_return_pct)}">${formatPercent(summary.total_return_pct, true)}</div>
+          <div class="metric-detail">Portfolio return vs starting cash</div>
+          <div class="metric-detail">Closed trades ${summary.closed_positions || 0}</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Realized PnL</div>
+          <div class="metric-value ${summaryClass(summary.realized_pnl_usdh)}">${formatMoney(summary.realized_pnl_usdh, true)}</div>
+          <div class="metric-detail">Avg win ${formatMoney(summary.avg_win_usdh, true)} USDH</div>
+          <div class="metric-detail">Avg loss ${formatMoney(summary.avg_loss_usdh, true)} USDH</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Win Rate</div>
+          <div class="metric-value ${summaryClass(summary.win_rate_pct - 50)}">${formatPercent(summary.win_rate_pct)}</div>
+          <div class="metric-detail">${summary.winning_positions || 0}/${summary.closed_positions || 0} winning closed positions</div>
+          <div class="metric-detail">Losses ${summary.losing_positions || 0}</div>
+        </article>
+      `;
+      document.getElementById('summary-row-two').innerHTML = `
+        <article class="metric-card">
+          <div class="metric-label">Open Positions</div>
+          <div class="metric-value metric-blue">${openPositions.length}</div>
+          <div class="metric-detail">Prediction ${predictionOpen} | Perp ${perpOpen}</div>
+          <div class="metric-detail">Live mark-to-market from stored mids</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Unrealized PnL</div>
+          <div class="metric-value ${summaryClass(summary.unrealized_pnl_usdh)}">${formatMoney(summary.unrealized_pnl_usdh, true)}</div>
+          <div class="metric-detail">Included in total equity</div>
+          <div class="metric-detail">Auto-refresh every 30 seconds</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Best Trade</div>
+          <div class="metric-value ${summary.best_trade_usdh > 0 ? 'metric-green' : 'metric-yellow'}">${formatMoney(summary.best_trade_usdh, true)}</div>
+          <div class="metric-detail">Profit factor ${Number(summary.profit_factor || 0).toFixed(2)}</div>
+          <div class="metric-detail">Largest realized winner</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Worst Trade</div>
+          <div class="metric-value ${summary.worst_trade_usdh < 0 ? 'metric-red' : 'metric-yellow'}">${formatMoney(summary.worst_trade_usdh, true)}</div>
+          <div class="metric-detail">Largest realized loser</div>
+          <div class="metric-detail">Closed-position downside tracker</div>
+        </article>
+      `;
+    }
+
+    function renderEquityChart(payload) {
+      const summary = payload.summary || {};
+      const points = payload.equity_curve || [];
+      const labels = points.map(point => new Date(point.timestamp).toLocaleString());
+      const equity = points.map(point => Number(point.equity || 0));
+      const baseline = points.map(() => Number(summary.starting_cash_usdh || 0));
+
+      if (typeof Chart === 'undefined') {
+        return;
+      }
+
+      const data = {
+        labels,
+        datasets: [
+          {
+            label: 'Portfolio Equity',
+            data: equity,
+            borderColor: '#4da3ff',
+            backgroundColor: 'rgba(77, 163, 255, 0.08)',
+            pointRadius: 0,
+            tension: 0.26,
+            borderWidth: 2.5,
+            fill: {
+              target: { value: Number(summary.starting_cash_usdh || 0) },
+              above: 'rgba(55, 214, 122, 0.18)',
+              below: 'rgba(249, 112, 102, 0.18)',
+            },
+          },
+          {
+            label: 'Starting Cash',
+            data: baseline,
+            borderColor: 'rgba(147, 164, 184, 0.45)',
+            pointRadius: 0,
+            tension: 0,
+            borderDash: [6, 6],
+            borderWidth: 1.5,
+          },
+        ],
+      };
+
+      const options = {
+        responsive: true,
+        maintainAspectRatio: false,
+        animation: false,
+        plugins: {
+          legend: { labels: { color: '#e8eef5' } },
+          tooltip: {
+            callbacks: {
+              label(context) {
+                return `${context.dataset.label}: ${Number(context.parsed.y || 0).toFixed(2)} USDH`;
+              },
+            },
+          },
+        },
+        scales: {
+          x: {
+            ticks: { color: '#93a4b8', maxTicksLimit: 8 },
+            grid: { color: 'rgba(147, 164, 184, 0.08)' },
+          },
+          y: {
+            ticks: {
+              color: '#93a4b8',
+              callback(value) { return `${Number(value).toFixed(0)}`; },
+            },
+            grid: { color: 'rgba(147, 164, 184, 0.08)' },
+          },
+        },
+      };
+
+      if (equityChart) {
+        equityChart.data = data;
+        equityChart.options = options;
+        equityChart.update();
+        return;
+      }
+
+      equityChart = new Chart(document.getElementById('equity-chart').getContext('2d'), {
+        type: 'line',
+        data,
+        options,
+      });
+    }
+
+    function closedSortValue(position, key) {
+      if (key === 'market_label') return marketLabel(position);
+      const value = position[key];
+      if (typeof value === 'string') return value.toLowerCase();
+      if (typeof value === 'boolean') return value ? 1 : 0;
+      return Number(value || 0);
+    }
+
+    function sortedClosedPositions(positions) {
+      const factor = state.closedSortDir === 'asc' ? 1 : -1;
+      return [...positions].sort((left, right) => {
+        const a = closedSortValue(left, state.closedSortKey);
+        const b = closedSortValue(right, state.closedSortKey);
+        if (typeof a === 'string' || typeof b === 'string') {
+          return String(a).localeCompare(String(b)) * factor;
+        }
+        return (Number(a) - Number(b)) * factor;
+      });
+    }
+
+    function renderClosedPositions(payload) {
+      const tbody = document.querySelector('#closed-positions-table tbody');
+      const positions = sortedClosedPositions(payload.closed_positions || []);
+      document.querySelectorAll('#closed-positions-table th[data-sort-key]').forEach(header => {
+        const key = header.dataset.sortKey;
+        const active = key === state.closedSortKey;
+        header.innerHTML = `${header.textContent.replace(/\s+[▲▼]$/, '')}${active ? `<span class="sort-indicator">${state.closedSortDir === 'asc' ? '▲' : '▼'}</span>` : ''}`;
+      });
+      if (!positions.length) {
+        tbody.innerHTML = '<tr><td colspan="10" class="muted">No closed positions yet.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = positions.map(position => `
+        <tr class="${Number(position.realized_pnl_usdh || 0) >= 0 ? 'table-row-profit' : 'table-row-loss'}">
+          <td>${marketCell(position)}</td>
+          <td>${position.market_type}</td>
+          <td>${directionBadge(position.direction)}</td>
+          <td>${formatPrice(position.entry_price)}</td>
+          <td>${formatPrice(position.exit_price)}</td>
+          <td>${formatMoney(position.size_usdh)}</td>
+          <td class="${Number(position.realized_pnl_usdh || 0) >= 0 ? 'metric-green' : 'metric-red'}">${formatMoney(position.realized_pnl_usdh, true)}</td>
+          <td>${formatHours(position.duration_hours)}</td>
+          <td>${position.trigger_type || 'n/a'}</td>
+          <td><span class="badge ${position.wallet_bonus_applied ? 'badge-on' : 'badge-off'}">${position.wallet_bonus_applied ? 'ON' : 'OFF'}</span></td>
+        </tr>
+      `).join('');
+    }
+
+    function renderOpenPositions(payload) {
+      const tbody = document.querySelector('#open-positions-table tbody');
+      const positions = payload.open_positions || [];
+      if (!positions.length) {
+        tbody.innerHTML = '<tr><td colspan="9" class="muted">No open positions.</td></tr>';
+        return;
+      }
+      tbody.innerHTML = positions.map(position => `
+        <tr>
+          <td>${marketCell(position)}</td>
+          <td>${position.market_type}</td>
+          <td>${directionBadge(position.direction)}</td>
+          <td>${formatPrice(position.entry_price)}</td>
+          <td>${formatPrice(position.mark_price)}</td>
+          <td>${formatMoney(position.size_usdh)}</td>
+          <td class="${Number(position.unrealized_pnl_usdh || 0) >= 0 ? 'metric-green' : 'metric-red'}">${position.unrealized_pnl_usdh === null || position.unrealized_pnl_usdh === undefined ? 'n/a' : formatMoney(position.unrealized_pnl_usdh, true)}</td>
+          <td>${formatHours(position.age_hours)}</td>
+          <td>${formatExpiryDisplay(position)}</td>
+        </tr>
+      `).join('');
+    }
+
+    function render(payload) {
+      renderSummary(payload);
+      renderEquityChart(payload);
+      renderClosedPositions(payload);
+      renderOpenPositions(payload);
+    }
+
+    async function refreshData() {
+      try {
+        const response = await fetch('/api/ledger');
+        if (!response.ok) throw new Error(`Request failed with ${response.status}`);
+        state.payload = await response.json();
+        render(state.payload);
+        document.getElementById('last-updated').textContent = `Updated ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        document.getElementById('last-updated').textContent = `Ledger refresh failed: ${error.message}`;
+      }
+    }
+
+    document.querySelectorAll('#closed-positions-table th[data-sort-key]').forEach(header => {
+      header.addEventListener('click', () => {
+        const key = header.dataset.sortKey;
+        if (state.closedSortKey === key) {
+          state.closedSortDir = state.closedSortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          state.closedSortKey = key;
+          state.closedSortDir = key === 'market_label' || key === 'market_type' || key === 'direction' || key === 'trigger_type' ? 'asc' : 'desc';
+        }
+        if (state.payload) renderClosedPositions(state.payload);
+      });
+    });
+
+    refreshData();
+    setInterval(refreshData, AUTO_REFRESH_MS);
+  </script>
+</body>
+</html>
