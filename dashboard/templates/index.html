@@ -245,6 +245,34 @@
       display: grid;
       gap: 12px;
     }
+    .decision-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+    .decision-split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .section-caption {
+      margin: 0 0 10px;
+      font-size: 14px;
+      color: var(--text);
+    }
+    .compact-table th,
+    .compact-table td {
+      padding: 8px 6px;
+      font-size: 13px;
+    }
+    .cell-detail {
+      display: block;
+      margin-top: 4px;
+      color: var(--muted);
+      font-size: 12px;
+    }
     .spotlight-card {
       border-radius: 16px;
       border: 1px solid rgba(122, 145, 170, 0.2);
@@ -276,11 +304,14 @@
     }
     @media (max-width: 1200px) {
       .summary-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .decision-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .decision-split { grid-template-columns: 1fr; }
       main { grid-template-columns: 1fr; }
     }
     @media (max-width: 720px) {
       header { flex-direction: column; }
       .summary-grid { grid-template-columns: 1fr; }
+      .decision-grid { grid-template-columns: 1fr; }
       .search-input { min-width: 0; width: 100%; }
       .panel-tools { width: 100%; }
     }
@@ -369,6 +400,61 @@
       <section class="panel">
         <div class="panel-header">
           <div>
+            <h2>Decision Quality</h2>
+            <div class="panel-subtitle">Followed signals versus the full signal set over the same 5-minute markout window, so you can see whether Remora is selecting better trades than the raw feed.</div>
+          </div>
+        </div>
+        <div class="decision-grid" id="decision-summary"></div>
+        <table class="compact-table" id="decision-trigger-table">
+          <thead>
+            <tr>
+              <th>Trigger</th>
+              <th>Pred Followed</th>
+              <th>Pred Baseline</th>
+              <th>Pred Lift</th>
+              <th>Perp Followed</th>
+              <th>Perp Baseline</th>
+              <th>Perp Lift</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+        <div class="decision-split">
+          <div>
+            <h3 class="section-caption">Side And Wallet Bonus</h3>
+            <table class="compact-table" id="decision-attribute-table">
+              <thead>
+                <tr>
+                  <th>Market</th>
+                  <th>Segment</th>
+                  <th>Followed</th>
+                  <th>Baseline</th>
+                  <th>Lift</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div>
+            <h3 class="section-caption">Perp Coin Edge</h3>
+            <table class="compact-table" id="decision-coin-table">
+              <thead>
+                <tr>
+                  <th>Coin</th>
+                  <th>Followed</th>
+                  <th>Baseline</th>
+                  <th>Lift</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
             <h2 id="signals-title">Prediction Signals</h2>
             <div class="panel-subtitle" id="signals-subtitle">Recent whale activity in the tracked prediction market.</div>
           </div>
@@ -423,6 +509,7 @@
       summary: null,
       positions: { prediction: [], perp: [], all: [] },
       signalQuality: null,
+      decisionQuality: null,
       whaleSpotlight: [],
       pnlSeries: null,
       predictionSignals: [],
@@ -694,6 +781,115 @@
       `).join('');
     }
 
+    function renderDecisionMetricCell(comparison, metricKey = 'avg_markout_pct') {
+      const followed = comparison?.followed || {};
+      const value = followed[metricKey];
+      const detail = `${followed.favorable_signals || 0}/${followed.evaluated_signals || 0} favorable`;
+      const className = Number(value || 0) >= 0 ? 'metric-green' : 'metric-red';
+      return `
+        <span class="${className}">${formatSignedPercent(value)}</span>
+        <span class="cell-detail">${detail}</span>
+      `;
+    }
+
+    function renderDecisionBaselineCell(comparison, metricKey = 'avg_markout_pct') {
+      const baseline = comparison?.baseline || {};
+      return `
+        <span>${formatSignedPercent(baseline[metricKey])}</span>
+        <span class="cell-detail">${baseline.favorable_signals || 0}/${baseline.evaluated_signals || 0} favorable</span>
+      `;
+    }
+
+    function renderDecisionLiftCell(comparison) {
+      const lift = comparison?.markout_lift_pct;
+      const className = Number(lift || 0) >= 0 ? 'metric-green' : 'metric-red';
+      return `
+        <span class="${className}">${formatSignedPercent(lift)}</span>
+        <span class="cell-detail">Win-rate lift ${formatSignedPercent(comparison?.favorable_lift_pct)}</span>
+      `;
+    }
+
+    function renderDecisionQuality(payload) {
+      const summary = payload?.summary || {};
+      const decisionSummary = document.getElementById('decision-summary');
+      const prediction = summary.prediction || {};
+      const perp = summary.perp || {};
+      decisionSummary.innerHTML = `
+        <article class="metric-card">
+          <div class="metric-label">Prediction Followed Avg</div>
+          <div class="metric-value ${Number(prediction.followed?.avg_markout_pct || 0) >= 0 ? 'metric-green' : 'metric-red'}">${formatSignedPercent(prediction.followed?.avg_markout_pct)}</div>
+          <div class="metric-detail">${prediction.followed?.favorable_signals || 0}/${prediction.followed?.evaluated_signals || 0} favorable followed signals</div>
+          <div class="metric-detail">Selection rate ${formatPercent(prediction.selection_rate || 0, 0)}</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Prediction Selection Lift</div>
+          <div class="metric-value ${Number(prediction.markout_lift_pct || 0) >= 0 ? 'metric-green' : 'metric-red'}">${formatSignedPercent(prediction.markout_lift_pct)}</div>
+          <div class="metric-detail">Baseline ${formatSignedPercent(prediction.baseline?.avg_markout_pct)}</div>
+          <div class="metric-detail">Win-rate lift ${formatSignedPercent(prediction.favorable_lift_pct)}</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Perp Followed Avg</div>
+          <div class="metric-value ${Number(perp.followed?.avg_markout_pct || 0) >= 0 ? 'metric-green' : 'metric-red'}">${formatSignedPercent(perp.followed?.avg_markout_pct)}</div>
+          <div class="metric-detail">${perp.followed?.favorable_signals || 0}/${perp.followed?.evaluated_signals || 0} favorable followed signals</div>
+          <div class="metric-detail">Selection rate ${formatPercent(perp.selection_rate || 0, 0)}</div>
+        </article>
+        <article class="metric-card">
+          <div class="metric-label">Perp Selection Lift</div>
+          <div class="metric-value ${Number(perp.markout_lift_pct || 0) >= 0 ? 'metric-green' : 'metric-red'}">${formatSignedPercent(perp.markout_lift_pct)}</div>
+          <div class="metric-detail">Baseline ${formatSignedPercent(perp.baseline?.avg_markout_pct)}</div>
+          <div class="metric-detail">Win-rate lift ${formatSignedPercent(perp.favorable_lift_pct)}</div>
+        </article>
+      `;
+
+      const triggerBody = document.querySelector('#decision-trigger-table tbody');
+      const triggers = payload?.trigger_breakdown || [];
+      triggerBody.innerHTML = triggers.length ? triggers.map(row => `
+        <tr>
+          <td>${row.trigger_type}</td>
+          <td>${renderDecisionMetricCell(row.prediction)}</td>
+          <td>${renderDecisionBaselineCell(row.prediction)}</td>
+          <td>${renderDecisionLiftCell(row.prediction)}</td>
+          <td>${renderDecisionMetricCell(row.perp)}</td>
+          <td>${renderDecisionBaselineCell(row.perp)}</td>
+          <td>${renderDecisionLiftCell(row.perp)}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="7" class="muted">No trigger-level decision-quality data yet.</td></tr>';
+
+      const attributeRows = [];
+      for (const row of payload?.prediction_side_breakdown || []) {
+        attributeRows.push({ market: 'Prediction', segment: `Side ${row.side}`, comparison: row.comparison });
+      }
+      for (const row of payload?.perp_side_breakdown || []) {
+        attributeRows.push({ market: 'Perp', segment: `Side ${row.side}`, comparison: row.comparison });
+      }
+      for (const row of payload?.wallet_bonus_breakdown || []) {
+        attributeRows.push({ market: 'Prediction', segment: `Wallet bonus ${row.wallet_bonus_applied ? 'on' : 'off'}`, comparison: row.prediction });
+        attributeRows.push({ market: 'Perp', segment: `Wallet bonus ${row.wallet_bonus_applied ? 'on' : 'off'}`, comparison: row.perp });
+      }
+      attributeRows.sort((left, right) => Number(right.comparison?.markout_lift_pct || -999) - Number(left.comparison?.markout_lift_pct || -999));
+      const attributeBody = document.querySelector('#decision-attribute-table tbody');
+      attributeBody.innerHTML = attributeRows.length ? attributeRows.map(row => `
+        <tr>
+          <td>${row.market}</td>
+          <td>${row.segment}</td>
+          <td>${renderDecisionMetricCell(row.comparison)}</td>
+          <td>${renderDecisionBaselineCell(row.comparison)}</td>
+          <td>${renderDecisionLiftCell(row.comparison)}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="5" class="muted">No side or wallet-bonus segments available yet.</td></tr>';
+
+      const coinBody = document.querySelector('#decision-coin-table tbody');
+      const coinRows = payload?.perp_coin_breakdown || [];
+      coinBody.innerHTML = coinRows.length ? coinRows.map(row => `
+        <tr>
+          <td>${row.coin}</td>
+          <td>${renderDecisionMetricCell(row.comparison)}</td>
+          <td>${renderDecisionBaselineCell(row.comparison)}</td>
+          <td>${renderDecisionLiftCell(row.comparison)}</td>
+        </tr>
+      `).join('') : '<tr><td colspan="4" class="muted">No perp coin breakdown available yet.</td></tr>';
+    }
+
     function renderWhaleSpotlight(wallets) {
       const container = document.getElementById('whale-spotlight');
       if (!wallets.length) {
@@ -847,11 +1043,12 @@
     }
 
     async function refresh() {
-      const [wallets, summary, positions, signalQuality, pnlSeries, whaleSpotlight, predictionSignals, predictionOrders, perpSignals, perpOrders] = await Promise.all([
+      const [wallets, summary, positions, signalQuality, decisionQuality, pnlSeries, whaleSpotlight, predictionSignals, predictionOrders, perpSignals, perpOrders] = await Promise.all([
         fetch('/api/wallets').then(r => r.json()),
         fetch('/api/dashboard-summary').then(r => r.json()),
         fetch('/api/positions').then(r => r.json()),
         fetch('/api/signal-quality').then(r => r.json()),
+        fetch('/api/decision-quality').then(r => r.json()),
         fetch('/api/pnl-series').then(r => r.json()),
         fetch('/api/whale-spotlight').then(r => r.json()),
         fetch('/api/signals').then(r => r.json()),
@@ -864,6 +1061,7 @@
       state.summary = summary;
       state.positions = positions;
       state.signalQuality = signalQuality;
+      state.decisionQuality = decisionQuality;
       state.whaleSpotlight = whaleSpotlight;
       state.pnlSeries = pnlSeries;
       state.predictionSignals = predictionSignals;
@@ -874,6 +1072,7 @@
       renderSummary(summary);
       renderPnlChart(pnlSeries);
       renderSignalQuality(signalQuality);
+      renderDecisionQuality(decisionQuality);
       renderWhaleSpotlight(whaleSpotlight);
       renderWallets();
       renderActiveFeeds();

@@ -25,6 +25,7 @@ app = Flask(__name__, template_folder=str(ROOT / "dashboard" / "templates"))
 SIGNAL_MARKOUT_LIMIT = 250
 SIGNAL_QUALITY_WINDOW_SECONDS = 300
 MAX_PNL_SERIES_POINTS = 120
+DECISION_QUALITY_TOP_PERP_COINS = 8
 PREDICTION_MARKET_META_TTL_SECONDS = 300
 WHALE_SPOTLIGHT_CACHE_TTL_SECONDS = 300
 CLUSTER_WINDOW_SECONDS = 30
@@ -216,6 +217,42 @@ def _fetch_signal_rows(storage: Storage, table_name: str) -> list[Any]:
         ).fetchall()
 
 
+def _fetch_prediction_decision_signal_rows(storage: Storage) -> list[Any]:
+    with storage.connect() as connection:
+        return connection.execute(
+            """
+            SELECT id, market_id, asset_id, side, confidence, trigger_type, timestamp,
+                   wallet_bonus_applied, details_json
+            FROM whale_signals
+            ORDER BY timestamp DESC
+            """
+        ).fetchall()
+
+
+def _fetch_perp_decision_signal_rows(storage: Storage) -> list[Any]:
+    with storage.connect() as connection:
+        return connection.execute(
+            """
+            SELECT id, market_id, asset_id, coin, side, confidence, trigger_type, timestamp,
+                   wallet_bonus_applied, details_json
+            FROM perp_whale_signals
+            ORDER BY timestamp DESC
+            """
+        ).fetchall()
+
+
+def _followed_signal_ids(storage: Storage, table_name: str) -> set[int]:
+    with storage.connect() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT DISTINCT signal_id
+            FROM {table_name}
+            WHERE signal_id IS NOT NULL
+            """
+        ).fetchall()
+    return {int(row["signal_id"]) for row in rows if row["signal_id"] is not None}
+
+
 def _fetch_mark_rows(storage: Storage, table_name: str, keys: set[tuple[str, int]]) -> list[dict[str, Any]]:
     if not keys:
         return []
@@ -332,6 +369,210 @@ def _signal_quality_breakdown(
             payload["favorable_pct"] = float(payload["favorable_signals"]) / evaluated
             payload["avg_markout_pct"] = markout_sums[trigger_type] / evaluated
     return stats
+
+
+def _signal_markout_evaluations(
+    signal_rows: list[Any],
+    event_series: dict[tuple[str, int], dict[str, list[float]]],
+    side_map: dict[str, int],
+    followed_signal_ids: set[int],
+    market_type: str,
+) -> list[dict[str, Any]]:
+    evaluations: list[dict[str, Any]] = []
+    for row in signal_rows:
+        signal_timestamp = _parse_iso_timestamp(str(row["timestamp"]))
+        if signal_timestamp is None:
+            continue
+        details = _json_object(row["details_json"])
+        entry_mid = details.get("mid_price")
+        direction = side_map.get(str(row["side"]))
+        markout_pct = None
+        if isinstance(entry_mid, (int, float)) and float(entry_mid) > 0 and direction is not None:
+            future_mid = _markout_mid_within_window(
+                event_series.get((str(row["market_id"]), int(row["asset_id"]))),
+                signal_timestamp.timestamp(),
+                SIGNAL_QUALITY_WINDOW_SECONDS,
+            )
+            if future_mid is not None:
+                markout_pct = direction * ((float(future_mid) - float(entry_mid)) / float(entry_mid))
+        try:
+            coin = row["coin"]
+        except (IndexError, KeyError):
+            coin = None
+        trigger_components = tuple(
+            sorted(
+                {
+                    _normalize_trigger_type(component)
+                    for component in str(row["trigger_type"]).split("+")
+                    if component
+                }
+            )
+        )
+        evaluations.append(
+            {
+                "signal_id": int(row["id"]),
+                "market_type": market_type,
+                "market_id": str(row["market_id"]),
+                "asset_id": int(row["asset_id"]),
+                "coin": str(coin) if isinstance(coin, str) and coin else None,
+                "side": str(row["side"]),
+                "trigger_type": str(row["trigger_type"]),
+                "trigger_components": trigger_components,
+                "wallet_bonus_applied": bool(row["wallet_bonus_applied"]),
+                "markout_pct": markout_pct,
+                "followed": int(row["id"]) in followed_signal_ids,
+            }
+        )
+    return evaluations
+
+
+def _decision_quality_stats(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
+    evaluated = [evaluation for evaluation in evaluations if evaluation["markout_pct"] is not None]
+    favorable = [evaluation for evaluation in evaluated if float(evaluation["markout_pct"]) > 0]
+    avg_markout_pct = None
+    if evaluated:
+        avg_markout_pct = sum(float(evaluation["markout_pct"]) for evaluation in evaluated) / len(evaluated)
+    return {
+        "total_signals": len(evaluations),
+        "evaluated_signals": len(evaluated),
+        "favorable_signals": len(favorable),
+        "favorable_pct": (len(favorable) / len(evaluated)) if evaluated else None,
+        "avg_markout_pct": avg_markout_pct,
+    }
+
+
+def _decision_quality_comparison(evaluations: list[dict[str, Any]]) -> dict[str, Any]:
+    followed = [evaluation for evaluation in evaluations if evaluation["followed"]]
+    baseline_stats = _decision_quality_stats(evaluations)
+    followed_stats = _decision_quality_stats(followed)
+    markout_lift_pct = None
+    favorable_lift_pct = None
+    if baseline_stats["avg_markout_pct"] is not None and followed_stats["avg_markout_pct"] is not None:
+        markout_lift_pct = float(followed_stats["avg_markout_pct"]) - float(baseline_stats["avg_markout_pct"])
+    if baseline_stats["favorable_pct"] is not None and followed_stats["favorable_pct"] is not None:
+        favorable_lift_pct = float(followed_stats["favorable_pct"]) - float(baseline_stats["favorable_pct"])
+    return {
+        "followed": followed_stats,
+        "baseline": baseline_stats,
+        "selection_rate": (len(followed) / len(evaluations)) if evaluations else None,
+        "markout_lift_pct": markout_lift_pct,
+        "favorable_lift_pct": favorable_lift_pct,
+    }
+
+
+def _decision_quality_breakdown_rows(
+    evaluations: list[dict[str, Any]],
+    group_values: list[Any],
+    group_predicate: Any,
+    label_key: str,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for value in group_values:
+        group_evaluations = [evaluation for evaluation in evaluations if group_predicate(evaluation, value)]
+        if not group_evaluations:
+            continue
+        rows.append(
+            {
+                label_key: value,
+                "comparison": _decision_quality_comparison(group_evaluations),
+            }
+        )
+    return rows
+
+
+def _decision_quality_payload(storage: Storage) -> dict[str, Any]:
+    prediction_signal_rows = _fetch_prediction_decision_signal_rows(storage)
+    perp_signal_rows = _fetch_perp_decision_signal_rows(storage)
+    prediction_event_rows = _fetch_mark_rows(
+        storage,
+        "book_events",
+        {(str(row["market_id"]), int(row["asset_id"])) for row in prediction_signal_rows},
+    )
+    perp_event_rows = _fetch_mark_rows(
+        storage,
+        "perp_book_events",
+        {(str(row["market_id"]), int(row["asset_id"])) for row in perp_signal_rows},
+    )
+    prediction_evaluations = _signal_markout_evaluations(
+        prediction_signal_rows,
+        _build_event_series(prediction_event_rows),
+        {"YES": 1, "NO": -1},
+        _followed_signal_ids(storage, "orders"),
+        market_type="prediction",
+    )
+    perp_evaluations = _signal_markout_evaluations(
+        perp_signal_rows,
+        _build_event_series(perp_event_rows),
+        {"long": 1, "short": -1},
+        _followed_signal_ids(storage, "perp_orders"),
+        market_type="perp",
+    )
+    perp_coin_values = [
+        coin
+        for coin, _count in sorted(
+            defaultdict(int, {
+                evaluation["coin"]: sum(1 for candidate in perp_evaluations if candidate["coin"] == evaluation["coin"])
+                for evaluation in perp_evaluations
+                if evaluation["coin"]
+            }).items(),
+            key=lambda item: (-item[1], item[0]),
+        )[:DECISION_QUALITY_TOP_PERP_COINS]
+    ]
+
+    trigger_breakdown = []
+    for trigger_type in SIGNAL_QUALITY_TRIGGER_TYPES:
+        trigger_breakdown.append(
+            {
+                "trigger_type": trigger_type,
+                "prediction": _decision_quality_comparison(
+                    [evaluation for evaluation in prediction_evaluations if trigger_type in evaluation["trigger_components"]]
+                ),
+                "perp": _decision_quality_comparison(
+                    [evaluation for evaluation in perp_evaluations if trigger_type in evaluation["trigger_components"]]
+                ),
+            }
+        )
+
+    wallet_bonus_breakdown = [
+        {
+            "wallet_bonus_applied": wallet_bonus_applied,
+            "prediction": _decision_quality_comparison(
+                [evaluation for evaluation in prediction_evaluations if evaluation["wallet_bonus_applied"] is wallet_bonus_applied]
+            ),
+            "perp": _decision_quality_comparison(
+                [evaluation for evaluation in perp_evaluations if evaluation["wallet_bonus_applied"] is wallet_bonus_applied]
+            ),
+        }
+        for wallet_bonus_applied in (False, True)
+    ]
+
+    return {
+        "window_seconds": SIGNAL_QUALITY_WINDOW_SECONDS,
+        "summary": {
+            "prediction": _decision_quality_comparison(prediction_evaluations),
+            "perp": _decision_quality_comparison(perp_evaluations),
+        },
+        "trigger_breakdown": trigger_breakdown,
+        "wallet_bonus_breakdown": wallet_bonus_breakdown,
+        "prediction_side_breakdown": _decision_quality_breakdown_rows(
+            prediction_evaluations,
+            ["YES", "NO"],
+            lambda evaluation, side: evaluation["side"] == side,
+            "side",
+        ),
+        "perp_side_breakdown": _decision_quality_breakdown_rows(
+            perp_evaluations,
+            ["long", "short"],
+            lambda evaluation, side: evaluation["side"] == side,
+            "side",
+        ),
+        "perp_coin_breakdown": _decision_quality_breakdown_rows(
+            perp_evaluations,
+            perp_coin_values,
+            lambda evaluation, coin: evaluation["coin"] == coin,
+            "coin",
+        ),
+    }
 
 
 def _sample_timestamps(points: list[float], max_points: int) -> list[float]:
@@ -1644,6 +1885,11 @@ def signal_quality() -> object:
             ],
         }
     )
+
+
+@app.get("/api/decision-quality")
+def decision_quality() -> object:
+    return jsonify(_decision_quality_payload(get_storage()))
 
 
 @app.get("/api/whale-spotlight")
