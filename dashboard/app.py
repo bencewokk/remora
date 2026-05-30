@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -28,6 +28,8 @@ MAX_PNL_SERIES_POINTS = 120
 PREDICTION_MARKET_META_TTL_SECONDS = 300
 WHALE_SPOTLIGHT_CACHE_TTL_SECONDS = 300
 CLUSTER_WINDOW_SECONDS = 30
+CLUSTER_WINDOW_MIN_SECONDS = 10
+CLUSTER_WINDOW_MAX_SECONDS = 120
 CLUSTER_COLLAPSE_SECONDS = 5
 CLUSTER_MIN_EDGE_WEIGHT = 2
 CLUSTER_CONVOY_MIN_WIN_RATE = 0.60
@@ -694,6 +696,16 @@ def _wallet_address_key(address: str) -> str:
     return address.strip().lower()
 
 
+def _parse_cluster_window_seconds(value: str | None) -> int:
+    if value is None:
+        return CLUSTER_WINDOW_SECONDS
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError):
+        return CLUSTER_WINDOW_SECONDS
+    return max(CLUSTER_WINDOW_MIN_SECONDS, min(CLUSTER_WINDOW_MAX_SECONDS, parsed))
+
+
 def _parse_cluster_levels(levels_json: str | None) -> tuple[tuple[float, float], ...]:
     if not levels_json:
         return ()
@@ -876,7 +888,11 @@ def _cluster_recent_trades(events: list[dict[str, Any]]) -> dict[str, list[dict[
     return dict(recent_trades)
 
 
-def _cluster_edges(events: list[dict[str, Any]], address_display: dict[str, str]) -> list[dict[str, Any]]:
+def _cluster_edges(
+    events: list[dict[str, Any]],
+    address_display: dict[str, str],
+    window_seconds: int,
+) -> list[dict[str, Any]]:
     events_by_market_and_side: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
     for event in events:
         events_by_market_and_side[(event["market_id"], event["side"])].append(event)
@@ -887,7 +903,7 @@ def _cluster_edges(events: list[dict[str, Any]], address_display: dict[str, str]
         for index, left in enumerate(ordered_group):
             for right in ordered_group[index + 1 :]:
                 delta_seconds = (right["timestamp"] - left["timestamp"]).total_seconds()
-                if delta_seconds > CLUSTER_WINDOW_SECONDS:
+                if delta_seconds > window_seconds:
                     break
                 if left["address_key"] == right["address_key"]:
                     continue
@@ -923,6 +939,7 @@ def _cluster_convoys(
     events: list[dict[str, Any]],
     scores_by_wallet: dict[str, dict[str, Any]],
     address_display: dict[str, str],
+    window_seconds: int,
 ) -> list[dict[str, Any]]:
     eligible_wallets = {
         address_key: score
@@ -944,7 +961,7 @@ def _cluster_convoys(
         window: deque[dict[str, Any]] = deque()
         for event in ordered_group:
             window.append(event)
-            cutoff_timestamp = event["timestamp"].timestamp() - CLUSTER_WINDOW_SECONDS
+            cutoff_timestamp = event["timestamp"].timestamp() - window_seconds
             while window and window[0]["timestamp"].timestamp() < cutoff_timestamp:
                 window.popleft()
             wallet_keys = tuple(sorted({item["address_key"] for item in window}))
@@ -952,7 +969,7 @@ def _cluster_convoys(
                 continue
             convoy_key = (market_id, side, wallet_keys)
             last_emitted_timestamp = emitted_at.get(convoy_key)
-            if last_emitted_timestamp is not None and (event["timestamp"] - last_emitted_timestamp).total_seconds() <= CLUSTER_WINDOW_SECONDS:
+            if last_emitted_timestamp is not None and (event["timestamp"] - last_emitted_timestamp).total_seconds() <= window_seconds:
                 continue
             emitted_at[convoy_key] = event["timestamp"]
             combined_win_rate = sum(float(eligible_wallets[wallet_key]["win_rate"]) for wallet_key in wallet_keys) / len(wallet_keys)
@@ -968,7 +985,7 @@ def _cluster_convoys(
     return sorted(convoys, key=lambda item: item["timestamp"], reverse=True)
 
 
-def _wallet_clusters(storage: Storage) -> dict[str, Any]:
+def _wallet_clusters(storage: Storage, window_seconds: int = CLUSTER_WINDOW_SECONDS) -> dict[str, Any]:
     scores_by_wallet = _cluster_wallet_score_map(storage)
     prediction_events = _cluster_prediction_events(storage)
     perp_events = _cluster_perp_events(storage)
@@ -980,8 +997,8 @@ def _wallet_clusters(storage: Storage) -> dict[str, Any]:
         address_display.setdefault(event["address_key"], event["address"])
         last_active_by_wallet[event["address_key"]] = int(event["timestamp"].timestamp())
 
-    edges = _cluster_edges(all_events, address_display)
-    convoys = _cluster_convoys(all_events, scores_by_wallet, address_display)
+    edges = _cluster_edges(all_events, address_display, window_seconds)
+    convoys = _cluster_convoys(all_events, scores_by_wallet, address_display, window_seconds)
     recent_trades = _cluster_recent_trades(all_events)
 
     relevant_wallets: set[str] = set()
@@ -1035,7 +1052,8 @@ def clusters() -> str:
 
 @app.get("/api/wallet-clusters")
 def wallet_clusters() -> object:
-    return jsonify(_wallet_clusters(get_storage()))
+    window_seconds = _parse_cluster_window_seconds(request.args.get("window_seconds"))
+    return jsonify(_wallet_clusters(get_storage(), window_seconds=window_seconds))
 
 
 @app.get("/api/signal-quality")

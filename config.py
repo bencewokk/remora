@@ -72,7 +72,7 @@ class Config:
             follow_size_usdh=float(os.getenv("FOLLOW_SIZE_USDH", "50")),
             starting_cash_usdh=float(os.getenv("STARTING_CASH_USDH", "0")),
             discovery_interval_seconds=int(os.getenv("DISCOVERY_INTERVAL_SECONDS", "60")),
-            wallet_refresh_seconds=int(os.getenv("WALLET_REFRESH_SECONDS", "300")),
+            wallet_refresh_seconds=int(os.getenv("WALLET_REFRESH_SECONDS", "180")),
             poll_interval_seconds=int(os.getenv("POLL_INTERVAL_SECONDS", "5")),
             aggression_window_seconds=int(os.getenv("AGGRESSION_WINDOW_SECONDS", "60")),
             sequential_window_seconds=int(os.getenv("SEQUENTIAL_WINDOW_SECONDS", "10")),

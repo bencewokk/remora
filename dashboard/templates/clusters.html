@@ -32,6 +32,10 @@
       overflow: hidden;
     }
     a { color: inherit; }
+    button,
+    input {
+      font: inherit;
+    }
     .controls-bar {
       position: fixed;
       top: 0;
@@ -49,25 +53,32 @@
     }
     .top-left {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
       gap: 14px;
       margin-right: 8px;
+      min-width: 360px;
     }
     .back-link {
       text-decoration: none;
       color: var(--muted);
       font-weight: 600;
       letter-spacing: 0.03em;
+      padding-top: 4px;
     }
     .back-link:hover { color: var(--text); }
     .page-title {
       display: flex;
       flex-direction: column;
-      gap: 3px;
+      gap: 4px;
       min-width: 220px;
     }
     .page-title strong { font-size: 20px; }
     .page-title span { color: var(--muted); font-size: 13px; }
+    .mini-stats {
+      color: var(--text);
+      font-size: 12px;
+      letter-spacing: 0.02em;
+    }
     .control-group {
       display: flex;
       flex-direction: column;
@@ -97,9 +108,22 @@
       padding-top: 18px;
     }
     .toggle-wrap input { accent-color: var(--green); }
+    .reset-button {
+      margin-left: auto;
+      border: 1px solid rgba(122, 145, 170, 0.25);
+      background: rgba(14, 22, 30, 0.75);
+      color: var(--text);
+      border-radius: 999px;
+      padding: 10px 14px;
+      cursor: pointer;
+    }
+    .reset-button:hover {
+      border-color: rgba(122, 145, 170, 0.4);
+      background: rgba(18, 28, 40, 0.9);
+    }
     .graph-shell {
       position: fixed;
-      top: 92px;
+      top: 118px;
       left: 0;
       right: var(--sidebar-width);
       bottom: 0;
@@ -109,6 +133,10 @@
       height: 100%;
       display: block;
       cursor: grab;
+      touch-action: none;
+    }
+    #cluster-graph.panning {
+      cursor: grabbing;
     }
     .sidebar {
       position: fixed;
@@ -172,7 +200,7 @@
       position: fixed;
       pointer-events: none;
       opacity: 0;
-      background: rgba(10, 16, 22, 0.92);
+      background: rgba(10, 16, 22, 0.94);
       color: var(--text);
       border: 1px solid var(--panel-border-strong);
       border-radius: 999px;
@@ -209,7 +237,6 @@
       font-size: 12px;
       text-transform: uppercase;
       letter-spacing: 0.06em;
-      margin-left: auto;
       padding-top: 2px;
     }
     .convoy-list,
@@ -244,6 +271,45 @@
       border-radius: 50%;
       display: inline-block;
     }
+    .pan-surface {
+      fill: transparent;
+      pointer-events: all;
+    }
+    .edge-visible {
+      pointer-events: none;
+    }
+    .edge-hitbox {
+      stroke: transparent;
+      pointer-events: stroke;
+      cursor: pointer;
+    }
+    .node-halo {
+      fill: none;
+      stroke: rgba(77, 163, 255, 0.5);
+      opacity: 0;
+    }
+    .node-halo.active {
+      animation: nodePulse 2.4s ease-in-out infinite;
+      opacity: 0.5;
+    }
+    @keyframes nodePulse {
+      0%, 100% {
+        stroke-width: 1.5;
+        opacity: 0.18;
+      }
+      50% {
+        stroke-width: 7;
+        opacity: 0.65;
+      }
+    }
+    @media (max-width: 1240px) {
+      .controls-bar {
+        gap: 12px 14px;
+      }
+      .top-left {
+        min-width: 280px;
+      }
+    }
     @media (max-width: 1080px) {
       body { overflow: auto; }
       .controls-bar {
@@ -266,6 +332,9 @@
       .status-line {
         position: absolute;
       }
+      .reset-button {
+        margin-left: 0;
+      }
     }
   </style>
 </head>
@@ -276,6 +345,7 @@
       <div class="page-title">
         <strong>Wallet Cluster View</strong>
         <span>Derived from same-market, same-side co-trading windows across prediction and perp activity.</span>
+        <div class="mini-stats" id="title-stats">0 visible wallets • Avg win rate n/a • Combined PnL +0.00 USDH</div>
       </div>
     </div>
     <div class="control-group">
@@ -290,18 +360,24 @@
     </div>
     <div class="control-group">
       <label for="min-edge-weight">Minimum Edge Weight</label>
-      <output id="min-edge-weight-value">1</output>
-      <input id="min-edge-weight" type="range" min="1" max="10" value="1">
+      <output id="min-edge-weight-value">3</output>
+      <input id="min-edge-weight" type="range" min="1" max="10" value="3">
+    </div>
+    <div class="control-group">
+      <label for="convoy-window">Convoy Window</label>
+      <output id="convoy-window-value">30s</output>
+      <input id="convoy-window" type="range" min="10" max="120" value="30">
     </div>
     <label class="toggle-wrap">
       <input id="convoy-only" type="checkbox">
       <span class="toggle-label">Show Convoy Nodes Only</span>
     </label>
     <div class="stats-chip" id="graph-stats">Loading cluster graph…</div>
+    <button class="reset-button" id="reset-view" type="button">Reset View</button>
   </div>
 
   <div class="graph-shell" id="graph-shell">
-    <svg id="cluster-graph"></svg>
+    <svg id="cluster-graph" aria-label="Wallet cluster graph"></svg>
     <div class="status-line" id="last-updated">Waiting for cluster refresh…</div>
   </div>
 
@@ -329,29 +405,37 @@
     </section>
   </aside>
 
-  <div class="tooltip" id="node-tooltip"></div>
+  <div class="tooltip" id="cluster-tooltip"></div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
   <script>
+    const ACTIVE_WALLET_WINDOW_SECONDS = 2 * 60 * 60;
+    const AUTO_REFRESH_MS = 60000;
+
     const state = {
       payload: { wallets: [], edges: [], convoys: [] },
       selectedWalletAddress: null,
       filters: {
         minWinRate: 0,
         minTradeCount: 0,
-        minEdgeWeight: 1,
+        minEdgeWeight: 3,
         convoyOnly: false,
+        convoyWindow: 30,
       },
+      nodeLayouts: {},
+      viewTransform: null,
     };
 
     let simulation = null;
+    let zoomBehavior = null;
+    let convoyRefreshDebounceId = null;
 
     function truncateAddress(address) {
       return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'n/a';
     }
 
     function formatPercent(value, digits = 1) {
-      if (value === null || value === undefined) return 'Unscored';
+      if (value === null || value === undefined) return 'n/a';
       return `${(Number(value) * 100).toFixed(digits)}%`;
     }
 
@@ -384,6 +468,55 @@
       return 'red';
     }
 
+    function isGreenWallet(wallet) {
+      return wallet && wallet.win_rate !== null && wallet.win_rate !== undefined && Number(wallet.win_rate) >= 0.65;
+    }
+
+    function edgeColor(source, target) {
+      const sourceGreen = isGreenWallet(source);
+      const targetGreen = isGreenWallet(target);
+      if (sourceGreen && targetGreen) {
+        return 'rgba(55, 214, 122, 0.7)';
+      }
+      if ((sourceGreen && !targetGreen) || (!sourceGreen && targetGreen)) {
+        return 'rgba(247, 201, 72, 0.7)';
+      }
+      return 'rgba(147, 164, 184, 0.6)';
+    }
+
+    function nodeStrokeWidth(wallet, convoyWallets) {
+      if (wallet.address === state.selectedWalletAddress) {
+        return convoyWallets.has(wallet.address) ? 5 : 4;
+      }
+      return convoyWallets.has(wallet.address) ? 3.5 : 1.5;
+    }
+
+    function isRecentlyActive(wallet) {
+      if (!wallet.last_active_ts) {
+        return false;
+      }
+      const normalized = Number(wallet.last_active_ts) > 10000000000 ? Math.floor(Number(wallet.last_active_ts) / 1000) : Number(wallet.last_active_ts);
+      return normalized >= Math.floor(Date.now() / 1000) - ACTIVE_WALLET_WINDOW_SECONDS;
+    }
+
+    function showTooltip(text, event) {
+      const tooltip = document.getElementById('cluster-tooltip');
+      tooltip.textContent = text;
+      tooltip.style.opacity = '1';
+      tooltip.style.left = `${event.clientX}px`;
+      tooltip.style.top = `${event.clientY}px`;
+    }
+
+    function moveTooltip(event) {
+      const tooltip = document.getElementById('cluster-tooltip');
+      tooltip.style.left = `${event.clientX}px`;
+      tooltip.style.top = `${event.clientY}px`;
+    }
+
+    function hideTooltip() {
+      document.getElementById('cluster-tooltip').style.opacity = '0';
+    }
+
     function buildDerivedData() {
       const payload = state.payload || { wallets: [], edges: [], convoys: [] };
       const convoyWallets = new Set(payload.convoys.flatMap(convoy => convoy.wallets));
@@ -409,7 +542,12 @@
         return true;
       });
       const visibleConvoys = payload.convoys.filter(convoy => convoy.wallets.every(address => visibleWalletAddresses.has(address)));
-      return { visibleWallets, visibleEdges, visibleConvoys, convoyWallets };
+      const scoredWallets = visibleWallets.filter(wallet => wallet.win_rate !== null && wallet.win_rate !== undefined);
+      const avgWinRate = scoredWallets.length
+        ? scoredWallets.reduce((sum, wallet) => sum + Number(wallet.win_rate || 0), 0) / scoredWallets.length
+        : null;
+      const combinedPnl = visibleWallets.reduce((sum, wallet) => sum + Number(wallet.total_pnl_usdh || 0), 0);
+      return { visibleWallets, visibleEdges, visibleConvoys, convoyWallets, avgWinRate, combinedPnl };
     }
 
     function renderSidebar() {
@@ -456,28 +594,67 @@
       `;
     }
 
+    function updateStats(derived) {
+      const { visibleWallets, visibleEdges, visibleConvoys, avgWinRate, combinedPnl } = derived;
+      document.getElementById('title-stats').textContent = `${visibleWallets.length} visible wallets • Avg win rate ${avgWinRate === null ? 'n/a' : formatPercent(avgWinRate, 1)} • Combined PnL ${formatMoney(combinedPnl)}`;
+      document.getElementById('graph-stats').textContent = `${visibleWallets.length} wallets • ${visibleEdges.length} edges • ${visibleConvoys.length} convoys`;
+    }
+
+    function persistNodeLayout(wallet) {
+      state.nodeLayouts[wallet.address] = {
+        x: wallet.x,
+        y: wallet.y,
+        fx: wallet.fx,
+        fy: wallet.fy,
+      };
+    }
+
+    function applySavedLayout(wallet) {
+      const savedLayout = state.nodeLayouts[wallet.address];
+      if (!savedLayout) {
+        return wallet;
+      }
+      wallet.x = savedLayout.x;
+      wallet.y = savedLayout.y;
+      wallet.fx = savedLayout.fx;
+      wallet.fy = savedLayout.fy;
+      return wallet;
+    }
+
+    function resetView() {
+      state.viewTransform = d3.zoomIdentity;
+      const svg = d3.select('#cluster-graph');
+      if (zoomBehavior) {
+        svg.transition().duration(250).call(zoomBehavior.transform, d3.zoomIdentity);
+      }
+    }
+
     function renderGraph() {
       const graphShell = document.getElementById('graph-shell');
       const svg = d3.select('#cluster-graph');
-      const tooltip = document.getElementById('node-tooltip');
-      const stats = document.getElementById('graph-stats');
-      const { visibleWallets, visibleEdges, visibleConvoys, convoyWallets } = buildDerivedData();
+      const derived = buildDerivedData();
+      const { visibleWallets, visibleEdges, visibleConvoys, convoyWallets } = derived;
 
       if (typeof d3 === 'undefined') {
-        stats.textContent = 'D3 unavailable';
+        document.getElementById('graph-stats').textContent = 'D3 unavailable';
         return;
+      }
+
+      updateStats(derived);
+
+      if (simulation) {
+        simulation.stop();
       }
 
       if (!visibleWallets.length) {
         svg.selectAll('*').remove();
-        stats.textContent = 'No wallets match the current filters';
         renderSidebar();
         return;
       }
 
       const width = graphShell.clientWidth;
       const height = graphShell.clientHeight;
-      const walletsByAddress = new Map(visibleWallets.map(wallet => [wallet.address, { ...wallet }]));
+      const walletsByAddress = new Map(visibleWallets.map(wallet => [wallet.address, applySavedLayout({ ...wallet })]));
       const nodes = Array.from(walletsByAddress.values());
       const links = visibleEdges.map(edge => ({ ...edge }));
       const maxPositivePnl = Math.max(...nodes.map(node => Math.max(Number(node.total_pnl_usdh || 0), 0)), 1);
@@ -489,98 +666,154 @@
       svg.selectAll('*').remove();
       svg.attr('viewBox', `0 0 ${width} ${height}`);
 
-      const linkLayer = svg.append('g').attr('stroke-linecap', 'round');
-      const nodeLayer = svg.append('g');
+      const panSurface = svg.append('rect')
+        .attr('class', 'pan-surface')
+        .attr('width', width)
+        .attr('height', height);
+
+      const viewport = svg.append('g').attr('class', 'viewport');
+      const linkLayer = viewport.append('g').attr('stroke-linecap', 'round');
+      const edgeHitboxLayer = viewport.append('g');
+      const nodeLayer = viewport.append('g');
+
+      zoomBehavior = d3.zoom()
+        .scaleExtent([0.35, 3.5])
+        .filter(event => event.type === 'wheel' || (!event.ctrlKey && event.button === 0))
+        .on('start', () => {
+          svg.classed('panning', true);
+        })
+        .on('zoom', event => {
+          state.viewTransform = event.transform;
+          viewport.attr('transform', event.transform);
+        })
+        .on('end', () => {
+          svg.classed('panning', false);
+        });
+
+      svg.call(zoomBehavior).on('dblclick.zoom', null);
+      svg.call(zoomBehavior.transform, state.viewTransform || d3.zoomIdentity);
+      panSurface.on('mousedown', () => svg.classed('panning', true));
+      panSurface.on('mouseup', () => svg.classed('panning', false));
+      panSurface.on('mouseleave', () => svg.classed('panning', false));
 
       simulation = d3.forceSimulation(nodes)
         .force('link', d3.forceLink(links).id(node => node.address).distance(link => Math.max(48, 180 - (Number(link.weight || 1) * 18))))
-        .force('charge', d3.forceManyBody().strength(node => -140 - radiusScale(Math.max(Number(node.total_pnl_usdh || 0), 0)) * 4))
+        .force('charge', d3.forceManyBody().strength(node => -160 - radiusScale(Math.max(Number(node.total_pnl_usdh || 0), 0)) * 4))
         .force('center', d3.forceCenter(width / 2, height / 2))
         .force('x', d3.forceX(width / 2).strength(0.03))
         .force('y', d3.forceY(height / 2).strength(0.03))
-        .force('collision', d3.forceCollide().radius(node => radiusScale(Math.max(Number(node.total_pnl_usdh || 0), 0)) + 6));
+        .force('collision', d3.forceCollide().radius(node => radiusScale(Math.max(Number(node.total_pnl_usdh || 0), 0)) + 8));
 
-      const link = linkLayer.selectAll('line')
+      const visibleLink = linkLayer.selectAll('line')
         .data(links)
         .enter()
         .append('line')
+        .attr('class', 'edge-visible')
         .attr('stroke', edge => {
           const source = typeof edge.source === 'object' ? edge.source : walletsByAddress.get(edge.source);
           const target = typeof edge.target === 'object' ? edge.target : walletsByAddress.get(edge.target);
-          if ((source?.win_rate ?? 0) >= 0.65 && (target?.win_rate ?? 0) >= 0.65) {
-            return 'rgba(55, 214, 122, 0.65)';
-          }
-          return 'rgba(147, 164, 184, 0.55)';
+          return edgeColor(source, target);
         })
         .attr('stroke-opacity', edge => opacityScale(Number(edge.weight || 1)))
         .attr('stroke-width', edge => widthScale(Number(edge.weight || 1)));
 
-      const node = nodeLayer.selectAll('circle')
+      const edgeHitbox = edgeHitboxLayer.selectAll('line')
+        .data(links)
+        .enter()
+        .append('line')
+        .attr('class', 'edge-hitbox')
+        .attr('stroke-width', edge => widthScale(Number(edge.weight || 1)) + 10)
+        .on('mouseenter', (event, edge) => {
+          showTooltip(`Edge weight ${edge.weight}`, event);
+        })
+        .on('mousemove', event => {
+          moveTooltip(event);
+        })
+        .on('mouseleave', () => {
+          hideTooltip();
+        });
+
+      const nodeGroup = nodeLayer.selectAll('g')
         .data(nodes)
         .enter()
-        .append('circle')
-        .attr('r', wallet => radiusScale(Math.max(Number(wallet.total_pnl_usdh || 0), 0)))
-        .attr('fill', wallet => walletColor(wallet))
-        .attr('stroke', '#ffffff')
-        .attr('stroke-width', wallet => convoyWallets.has(wallet.address) ? 3.5 : 1.5)
+        .append('g')
         .style('cursor', 'pointer')
         .on('click', (_, wallet) => {
           state.selectedWalletAddress = wallet.address;
+          nodeCore.attr('stroke-width', current => nodeStrokeWidth(current, convoyWallets));
           renderSidebar();
-          node.attr('stroke-width', current => {
-            if (current.address === state.selectedWalletAddress) return convoyWallets.has(current.address) ? 5 : 4;
-            return convoyWallets.has(current.address) ? 3.5 : 1.5;
-          });
         })
         .on('mouseenter', (event, wallet) => {
-          tooltip.textContent = truncateAddress(wallet.address);
-          tooltip.style.opacity = '1';
-          tooltip.style.left = `${event.clientX}px`;
-          tooltip.style.top = `${event.clientY}px`;
+          showTooltip(truncateAddress(wallet.address), event);
         })
         .on('mousemove', event => {
-          tooltip.style.left = `${event.clientX}px`;
-          tooltip.style.top = `${event.clientY}px`;
+          moveTooltip(event);
         })
         .on('mouseleave', () => {
-          tooltip.style.opacity = '0';
+          hideTooltip();
+        });
+
+      nodeGroup.append('circle')
+        .attr('class', wallet => `node-halo ${isRecentlyActive(wallet) ? 'active' : ''}`)
+        .attr('r', wallet => radiusScale(Math.max(Number(wallet.total_pnl_usdh || 0), 0)) + 4);
+
+      const nodeCore = nodeGroup.append('circle')
+        .attr('r', wallet => radiusScale(Math.max(Number(wallet.total_pnl_usdh || 0), 0)))
+        .attr('fill', wallet => walletColor(wallet))
+        .attr('stroke', '#ffffff')
+        .attr('stroke-width', wallet => nodeStrokeWidth(wallet, convoyWallets));
+
+      const dragBehavior = d3.drag()
+        .on('start', (event, wallet) => {
+          event.sourceEvent.stopPropagation();
+          if (!event.active) {
+            simulation.alphaTarget(0.2).restart();
+          }
+          wallet.fx = wallet.x;
+          wallet.fy = wallet.y;
         })
-        .call(
-          d3.drag()
-            .on('start', (event, dragNode) => {
-              if (!event.active) simulation.alphaTarget(0.2).restart();
-              dragNode.fx = dragNode.x;
-              dragNode.fy = dragNode.y;
-            })
-            .on('drag', (event, dragNode) => {
-              dragNode.fx = event.x;
-              dragNode.fy = event.y;
-            })
-            .on('end', (event, dragNode) => {
-              if (!event.active) simulation.alphaTarget(0);
-              dragNode.fx = null;
-              dragNode.fy = null;
-            })
-        );
+        .on('drag', (event, wallet) => {
+          event.sourceEvent.stopPropagation();
+          wallet.fx = event.x;
+          wallet.fy = event.y;
+          persistNodeLayout(wallet);
+        })
+        .on('end', (event, wallet) => {
+          event.sourceEvent.stopPropagation();
+          if (!event.active) {
+            simulation.alphaTarget(0);
+          }
+          wallet.fx = event.x;
+          wallet.fy = event.y;
+          persistNodeLayout(wallet);
+        });
+
+      nodeGroup.call(dragBehavior);
 
       simulation.on('tick', () => {
-        link
+        visibleLink
           .attr('x1', edge => edge.source.x)
           .attr('y1', edge => edge.source.y)
           .attr('x2', edge => edge.target.x)
           .attr('y2', edge => edge.target.y);
 
-        node
-          .attr('cx', wallet => wallet.x)
-          .attr('cy', wallet => wallet.y);
+        edgeHitbox
+          .attr('x1', edge => edge.source.x)
+          .attr('y1', edge => edge.source.y)
+          .attr('x2', edge => edge.target.x)
+          .attr('y2', edge => edge.target.y);
+
+        nodeGroup.attr('transform', wallet => {
+          persistNodeLayout(wallet);
+          return `translate(${wallet.x}, ${wallet.y})`;
+        });
       });
 
-      stats.textContent = `${visibleWallets.length} wallets • ${visibleEdges.length} edges • ${visibleConvoys.length} convoys`;
       renderSidebar();
     }
 
     async function refreshData() {
-      const response = await fetch('/api/wallet-clusters');
+      const response = await fetch(`/api/wallet-clusters?window_seconds=${state.filters.convoyWindow}`);
       if (!response.ok) {
         throw new Error(`cluster api returned ${response.status}`);
       }
@@ -596,6 +829,18 @@
       document.getElementById('min-win-rate-value').textContent = `${state.filters.minWinRate}%`;
       document.getElementById('min-trade-count-value').textContent = `${state.filters.minTradeCount}`;
       document.getElementById('min-edge-weight-value').textContent = `${state.filters.minEdgeWeight}`;
+      document.getElementById('convoy-window-value').textContent = `${state.filters.convoyWindow}s`;
+    }
+
+    function scheduleConvoyRefresh() {
+      window.clearTimeout(convoyRefreshDebounceId);
+      convoyRefreshDebounceId = window.setTimeout(async () => {
+        try {
+          await refreshData();
+        } catch (error) {
+          document.getElementById('graph-stats').textContent = 'Cluster refresh failed';
+        }
+      }, 180);
     }
 
     function bindControls() {
@@ -610,13 +855,21 @@
         renderGraph();
       });
       document.getElementById('min-edge-weight').addEventListener('input', event => {
-        state.filters.minEdgeWeight = Number(event.target.value || 1);
+        state.filters.minEdgeWeight = Number(event.target.value || 3);
         syncControlLabels();
         renderGraph();
+      });
+      document.getElementById('convoy-window').addEventListener('input', event => {
+        state.filters.convoyWindow = Number(event.target.value || 30);
+        syncControlLabels();
+        scheduleConvoyRefresh();
       });
       document.getElementById('convoy-only').addEventListener('change', event => {
         state.filters.convoyOnly = Boolean(event.target.checked);
         renderGraph();
+      });
+      document.getElementById('reset-view').addEventListener('click', () => {
+        resetView();
       });
       window.addEventListener('resize', () => {
         if (state.payload.wallets.length) {
@@ -640,7 +893,7 @@
         } catch (error) {
           document.getElementById('graph-stats').textContent = 'Cluster refresh failed';
         }
-      }, 60000);
+      }, AUTO_REFRESH_MS);
     }
 
     bootstrap();
