@@ -1,0 +1,649 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remora Cluster View</title>
+  <style>
+    :root {
+      --bg: #0a1016;
+      --panel: rgba(20, 30, 40, 0.92);
+      --panel-soft: rgba(24, 36, 49, 0.96);
+      --card: rgba(28, 40, 54, 0.95);
+      --panel-border: rgba(122, 145, 170, 0.18);
+      --panel-border-strong: rgba(122, 145, 170, 0.28);
+      --text: #ebf2fa;
+      --muted: #93a4b8;
+      --green: #37d67a;
+      --yellow: #f7c948;
+      --red: #f97066;
+      --blue: #4da3ff;
+      --grey: #6f8094;
+      --sidebar-width: 280px;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top, rgba(38, 71, 109, 0.5) 0%, transparent 38%),
+        linear-gradient(180deg, #0f1720 0%, var(--bg) 58%);
+      overflow: hidden;
+    }
+    a { color: inherit; }
+    .controls-bar {
+      position: fixed;
+      top: 0;
+      left: 0;
+      right: var(--sidebar-width);
+      z-index: 10;
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 14px 18px;
+      padding: 18px 22px;
+      background: rgba(10, 16, 22, 0.88);
+      border-bottom: 1px solid var(--panel-border);
+      backdrop-filter: blur(10px);
+    }
+    .top-left {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-right: 8px;
+    }
+    .back-link {
+      text-decoration: none;
+      color: var(--muted);
+      font-weight: 600;
+      letter-spacing: 0.03em;
+    }
+    .back-link:hover { color: var(--text); }
+    .page-title {
+      display: flex;
+      flex-direction: column;
+      gap: 3px;
+      min-width: 220px;
+    }
+    .page-title strong { font-size: 20px; }
+    .page-title span { color: var(--muted); font-size: 13px; }
+    .control-group {
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+      min-width: 150px;
+    }
+    .control-group label,
+    .toggle-label,
+    .meta-text {
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+    }
+    .control-group output {
+      color: var(--text);
+      font-size: 13px;
+    }
+    input[type="range"] {
+      width: 100%;
+      accent-color: var(--blue);
+    }
+    .toggle-wrap {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding-top: 18px;
+    }
+    .toggle-wrap input { accent-color: var(--green); }
+    .graph-shell {
+      position: fixed;
+      top: 92px;
+      left: 0;
+      right: var(--sidebar-width);
+      bottom: 0;
+    }
+    #cluster-graph {
+      width: 100%;
+      height: 100%;
+      display: block;
+      cursor: grab;
+    }
+    .sidebar {
+      position: fixed;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      width: var(--sidebar-width);
+      padding: 18px 18px 20px;
+      background: var(--panel-soft);
+      border-left: 1px solid var(--panel-border-strong);
+      overflow-y: auto;
+      box-shadow: -24px 0 42px rgba(0, 0, 0, 0.18);
+    }
+    .sidebar-section {
+      background: var(--card);
+      border: 1px solid var(--panel-border);
+      border-radius: 16px;
+      padding: 14px;
+      margin-bottom: 14px;
+    }
+    .sidebar-section h2,
+    .sidebar-section h3 {
+      margin: 0 0 10px;
+      font-size: 16px;
+    }
+    .sidebar-section p,
+    .sidebar-section li,
+    .sidebar-section div {
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .metric-row,
+    .trade-row,
+    .convoy-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      align-items: baseline;
+      margin-bottom: 8px;
+    }
+    .muted { color: var(--muted); }
+    .wallet-address {
+      font-family: Consolas, monospace;
+      font-size: 12px;
+      word-break: break-all;
+      color: var(--text);
+    }
+    .pill {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pill.green { color: var(--green); border-color: rgba(55, 214, 122, 0.35); }
+    .pill.yellow { color: var(--yellow); border-color: rgba(247, 201, 72, 0.35); }
+    .pill.red { color: var(--red); border-color: rgba(249, 112, 102, 0.35); }
+    .pill.grey { color: var(--grey); border-color: rgba(111, 128, 148, 0.35); }
+    .tooltip {
+      position: fixed;
+      pointer-events: none;
+      opacity: 0;
+      background: rgba(10, 16, 22, 0.92);
+      color: var(--text);
+      border: 1px solid var(--panel-border-strong);
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 12px;
+      font-family: Consolas, monospace;
+      transform: translate(-50%, -135%);
+      transition: opacity 120ms ease;
+      z-index: 30;
+      white-space: nowrap;
+    }
+    .status-line {
+      position: absolute;
+      bottom: 18px;
+      left: 18px;
+      padding: 8px 12px;
+      background: rgba(10, 16, 22, 0.86);
+      border: 1px solid var(--panel-border);
+      border-radius: 999px;
+      color: var(--muted);
+      font-size: 12px;
+      backdrop-filter: blur(8px);
+    }
+    .empty-state {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .stats-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-left: auto;
+      padding-top: 2px;
+    }
+    .convoy-list,
+    .recent-trades {
+      display: grid;
+      gap: 10px;
+    }
+    .convoy-card,
+    .trade-card {
+      border: 1px solid rgba(122, 145, 170, 0.16);
+      border-radius: 14px;
+      background: rgba(14, 22, 30, 0.72);
+      padding: 10px;
+    }
+    .trade-card strong,
+    .convoy-card strong { display: block; margin-bottom: 4px; }
+    .legend {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .legend span {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+    .legend i {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+    @media (max-width: 1080px) {
+      body { overflow: auto; }
+      .controls-bar {
+        position: static;
+        right: 0;
+      }
+      .graph-shell {
+        position: relative;
+        right: 0;
+        top: 0;
+        height: 60vh;
+      }
+      .sidebar {
+        position: static;
+        width: auto;
+        border-left: 0;
+        border-top: 1px solid var(--panel-border-strong);
+        box-shadow: none;
+      }
+      .status-line {
+        position: absolute;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="controls-bar">
+    <div class="top-left">
+      <a class="back-link" href="/">Back to Dashboard</a>
+      <div class="page-title">
+        <strong>Wallet Cluster View</strong>
+        <span>Derived from same-market, same-side co-trading windows across prediction and perp activity.</span>
+      </div>
+    </div>
+    <div class="control-group">
+      <label for="min-win-rate">Minimum Win Rate</label>
+      <output id="min-win-rate-value">0%</output>
+      <input id="min-win-rate" type="range" min="0" max="100" value="0">
+    </div>
+    <div class="control-group">
+      <label for="min-trade-count">Minimum Trade Count</label>
+      <output id="min-trade-count-value">0</output>
+      <input id="min-trade-count" type="range" min="0" max="50" value="0">
+    </div>
+    <div class="control-group">
+      <label for="min-edge-weight">Minimum Edge Weight</label>
+      <output id="min-edge-weight-value">1</output>
+      <input id="min-edge-weight" type="range" min="1" max="10" value="1">
+    </div>
+    <label class="toggle-wrap">
+      <input id="convoy-only" type="checkbox">
+      <span class="toggle-label">Show Convoy Nodes Only</span>
+    </label>
+    <div class="stats-chip" id="graph-stats">Loading cluster graph…</div>
+  </div>
+
+  <div class="graph-shell" id="graph-shell">
+    <svg id="cluster-graph"></svg>
+    <div class="status-line" id="last-updated">Waiting for cluster refresh…</div>
+  </div>
+
+  <aside class="sidebar">
+    <section class="sidebar-section">
+      <h2>Convoy Alerts</h2>
+      <div class="convoy-list" id="convoy-alerts">
+        <div class="empty-state">No active convoys in the current filter window.</div>
+      </div>
+    </section>
+    <section class="sidebar-section">
+      <h3>Selected Wallet</h3>
+      <div id="selected-wallet">
+        <div class="empty-state">Click a node to inspect wallet details and recent clustered trades.</div>
+      </div>
+    </section>
+    <section class="sidebar-section">
+      <h3>Legend</h3>
+      <div class="legend">
+        <span><i style="background:#37d67a"></i> Win rate >= 65%</span>
+        <span><i style="background:#f7c948"></i> Win rate 50%-65%</span>
+        <span><i style="background:#f97066"></i> Win rate < 50%</span>
+        <span><i style="background:#6f8094"></i> Unscored</span>
+      </div>
+    </section>
+  </aside>
+
+  <div class="tooltip" id="node-tooltip"></div>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js" crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+  <script>
+    const state = {
+      payload: { wallets: [], edges: [], convoys: [] },
+      selectedWalletAddress: null,
+      filters: {
+        minWinRate: 0,
+        minTradeCount: 0,
+        minEdgeWeight: 1,
+        convoyOnly: false,
+      },
+    };
+
+    let simulation = null;
+
+    function truncateAddress(address) {
+      return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'n/a';
+    }
+
+    function formatPercent(value, digits = 1) {
+      if (value === null || value === undefined) return 'Unscored';
+      return `${(Number(value) * 100).toFixed(digits)}%`;
+    }
+
+    function formatMoney(value) {
+      const amount = Number(value || 0);
+      return `${amount >= 0 ? '+' : ''}${amount.toFixed(2)} USDH`;
+    }
+
+    function formatTimestamp(timestamp) {
+      if (!timestamp) return 'n/a';
+      const normalized = Number(timestamp) > 10000000000 ? Math.floor(Number(timestamp) / 1000) : Number(timestamp);
+      return new Date(normalized * 1000).toLocaleString();
+    }
+
+    function formatIso(value) {
+      return value ? new Date(value).toLocaleString() : 'n/a';
+    }
+
+    function walletColor(wallet) {
+      if (wallet.win_rate === null || wallet.win_rate === undefined) return '#6f8094';
+      if (wallet.win_rate >= 0.65) return '#37d67a';
+      if (wallet.win_rate >= 0.5) return '#f7c948';
+      return '#f97066';
+    }
+
+    function walletBadgeClass(wallet) {
+      if (wallet.win_rate === null || wallet.win_rate === undefined) return 'grey';
+      if (wallet.win_rate >= 0.65) return 'green';
+      if (wallet.win_rate >= 0.5) return 'yellow';
+      return 'red';
+    }
+
+    function buildDerivedData() {
+      const payload = state.payload || { wallets: [], edges: [], convoys: [] };
+      const convoyWallets = new Set(payload.convoys.flatMap(convoy => convoy.wallets));
+      const visibleWallets = payload.wallets.filter(wallet => {
+        if (wallet.win_rate === null || wallet.win_rate === undefined) {
+          if (state.filters.minWinRate > 0) return false;
+        } else if (wallet.win_rate < state.filters.minWinRate / 100) {
+          return false;
+        }
+        if ((wallet.trade_count || 0) < state.filters.minTradeCount) {
+          return false;
+        }
+        if (state.filters.convoyOnly && !convoyWallets.has(wallet.address)) {
+          return false;
+        }
+        return true;
+      });
+      const visibleWalletAddresses = new Set(visibleWallets.map(wallet => wallet.address));
+      const visibleEdges = payload.edges.filter(edge => {
+        if (edge.weight < state.filters.minEdgeWeight) return false;
+        if (!visibleWalletAddresses.has(edge.source) || !visibleWalletAddresses.has(edge.target)) return false;
+        if (state.filters.convoyOnly && (!convoyWallets.has(edge.source) || !convoyWallets.has(edge.target))) return false;
+        return true;
+      });
+      const visibleConvoys = payload.convoys.filter(convoy => convoy.wallets.every(address => visibleWalletAddresses.has(address)));
+      return { visibleWallets, visibleEdges, visibleConvoys, convoyWallets };
+    }
+
+    function renderSidebar() {
+      const { visibleWallets, visibleConvoys } = buildDerivedData();
+      const selectedWallet = visibleWallets.find(wallet => wallet.address === state.selectedWalletAddress) || null;
+      const alerts = document.getElementById('convoy-alerts');
+      const selectedWalletPanel = document.getElementById('selected-wallet');
+
+      if (!visibleConvoys.length) {
+        alerts.innerHTML = '<div class="empty-state">No active convoys in the current filter window.</div>';
+      } else {
+        alerts.innerHTML = visibleConvoys.slice(0, 8).map(convoy => `
+          <article class="convoy-card">
+            <strong>${convoy.market_id} ${convoy.side}</strong>
+            <div class="muted">${convoy.wallets.map(truncateAddress).join(' • ')}</div>
+            <div class="convoy-row"><span>Combined win rate</span><span>${formatPercent(convoy.combined_win_rate, 2)}</span></div>
+            <div class="muted">${formatIso(convoy.timestamp)}</div>
+          </article>
+        `).join('');
+      }
+
+      if (!selectedWallet) {
+        selectedWalletPanel.innerHTML = '<div class="empty-state">Click a node to inspect wallet details and recent clustered trades.</div>';
+        return;
+      }
+
+      const recentTrades = selectedWallet.recent_trades || [];
+      selectedWalletPanel.innerHTML = `
+        <div class="wallet-address">${selectedWallet.address}</div>
+        <div class="metric-row"><span class="muted">Win rate</span><span class="pill ${walletBadgeClass(selectedWallet)}">${formatPercent(selectedWallet.win_rate, 2)}</span></div>
+        <div class="metric-row"><span class="muted">Total PnL</span><span>${formatMoney(selectedWallet.total_pnl_usdh)}</span></div>
+        <div class="metric-row"><span class="muted">Trade count</span><span>${selectedWallet.trade_count || 0}</span></div>
+        <div class="metric-row"><span class="muted">Last active</span><span>${formatTimestamp(selectedWallet.last_active_ts)}</span></div>
+        <h3 style="margin-top:14px;">Recent Trades</h3>
+        <div class="recent-trades">
+          ${recentTrades.length ? recentTrades.map(trade => `
+            <article class="trade-card">
+              <strong>${trade.coin || trade.market_id} ${trade.side}</strong>
+              <div class="muted">${trade.market_type === 'perp' ? 'Perp market' : 'Prediction market'} ${trade.market_id}</div>
+              <div class="muted">${formatIso(trade.timestamp)}</div>
+            </article>
+          `).join('') : '<div class="empty-state">No recent clustered trades for this wallet.</div>'}
+        </div>
+      `;
+    }
+
+    function renderGraph() {
+      const graphShell = document.getElementById('graph-shell');
+      const svg = d3.select('#cluster-graph');
+      const tooltip = document.getElementById('node-tooltip');
+      const stats = document.getElementById('graph-stats');
+      const { visibleWallets, visibleEdges, visibleConvoys, convoyWallets } = buildDerivedData();
+
+      if (typeof d3 === 'undefined') {
+        stats.textContent = 'D3 unavailable';
+        return;
+      }
+
+      if (!visibleWallets.length) {
+        svg.selectAll('*').remove();
+        stats.textContent = 'No wallets match the current filters';
+        renderSidebar();
+        return;
+      }
+
+      const width = graphShell.clientWidth;
+      const height = graphShell.clientHeight;
+      const walletsByAddress = new Map(visibleWallets.map(wallet => [wallet.address, { ...wallet }]));
+      const nodes = Array.from(walletsByAddress.values());
+      const links = visibleEdges.map(edge => ({ ...edge }));
+      const maxPositivePnl = Math.max(...nodes.map(node => Math.max(Number(node.total_pnl_usdh || 0), 0)), 1);
+      const radiusScale = d3.scaleSqrt().domain([0, maxPositivePnl]).range([8, 40]);
+      const maxEdgeWeight = Math.max(...links.map(link => Number(link.weight || 1)), 1);
+      const opacityScale = d3.scaleLinear().domain([1, maxEdgeWeight]).range([0.2, 0.9]);
+      const widthScale = d3.scaleLinear().domain([1, maxEdgeWeight]).range([1, 4]);
+
+      svg.selectAll('*').remove();
+      svg.attr('viewBox', `0 0 ${width} ${height}`);
+
+      const linkLayer = svg.append('g').attr('stroke-linecap', 'round');
+      const nodeLayer = svg.append('g');
+
+      simulation = d3.forceSimulation(nodes)
+        .force('link', d3.forceLink(links).id(node => node.address).distance(link => Math.max(48, 180 - (Number(link.weight || 1) * 18))))
+        .force('charge', d3.forceManyBody().strength(node => -140 - radiusScale(Math.max(Number(node.total_pnl_usdh || 0), 0)) * 4))
+        .force('center', d3.forceCenter(width / 2, height / 2))
+        .force('x', d3.forceX(width / 2).strength(0.03))
+        .force('y', d3.forceY(height / 2).strength(0.03))
+        .force('collision', d3.forceCollide().radius(node => radiusScale(Math.max(Number(node.total_pnl_usdh || 0), 0)) + 6));
+
+      const link = linkLayer.selectAll('line')
+        .data(links)
+        .enter()
+        .append('line')
+        .attr('stroke', edge => {
+          const source = typeof edge.source === 'object' ? edge.source : walletsByAddress.get(edge.source);
+          const target = typeof edge.target === 'object' ? edge.target : walletsByAddress.get(edge.target);
+          if ((source?.win_rate ?? 0) >= 0.65 && (target?.win_rate ?? 0) >= 0.65) {
+            return 'rgba(55, 214, 122, 0.65)';
+          }
+          return 'rgba(147, 164, 184, 0.55)';
+        })
+        .attr('stroke-opacity', edge => opacityScale(Number(edge.weight || 1)))
+        .attr('stroke-width', edge => widthScale(Number(edge.weight || 1)));
+
+      const node = nodeLayer.selectAll('circle')
+        .data(nodes)
+        .enter()
+        .append('circle')
+        .attr('r', wallet => radiusScale(Math.max(Number(wallet.total_pnl_usdh || 0), 0)))
+        .attr('fill', wallet => walletColor(wallet))
+        .attr('stroke', '#ffffff')
+        .attr('stroke-width', wallet => convoyWallets.has(wallet.address) ? 3.5 : 1.5)
+        .style('cursor', 'pointer')
+        .on('click', (_, wallet) => {
+          state.selectedWalletAddress = wallet.address;
+          renderSidebar();
+          node.attr('stroke-width', current => {
+            if (current.address === state.selectedWalletAddress) return convoyWallets.has(current.address) ? 5 : 4;
+            return convoyWallets.has(current.address) ? 3.5 : 1.5;
+          });
+        })
+        .on('mouseenter', (event, wallet) => {
+          tooltip.textContent = truncateAddress(wallet.address);
+          tooltip.style.opacity = '1';
+          tooltip.style.left = `${event.clientX}px`;
+          tooltip.style.top = `${event.clientY}px`;
+        })
+        .on('mousemove', event => {
+          tooltip.style.left = `${event.clientX}px`;
+          tooltip.style.top = `${event.clientY}px`;
+        })
+        .on('mouseleave', () => {
+          tooltip.style.opacity = '0';
+        })
+        .call(
+          d3.drag()
+            .on('start', (event, dragNode) => {
+              if (!event.active) simulation.alphaTarget(0.2).restart();
+              dragNode.fx = dragNode.x;
+              dragNode.fy = dragNode.y;
+            })
+            .on('drag', (event, dragNode) => {
+              dragNode.fx = event.x;
+              dragNode.fy = event.y;
+            })
+            .on('end', (event, dragNode) => {
+              if (!event.active) simulation.alphaTarget(0);
+              dragNode.fx = null;
+              dragNode.fy = null;
+            })
+        );
+
+      simulation.on('tick', () => {
+        link
+          .attr('x1', edge => edge.source.x)
+          .attr('y1', edge => edge.source.y)
+          .attr('x2', edge => edge.target.x)
+          .attr('y2', edge => edge.target.y);
+
+        node
+          .attr('cx', wallet => wallet.x)
+          .attr('cy', wallet => wallet.y);
+      });
+
+      stats.textContent = `${visibleWallets.length} wallets • ${visibleEdges.length} edges • ${visibleConvoys.length} convoys`;
+      renderSidebar();
+    }
+
+    async function refreshData() {
+      const response = await fetch('/api/wallet-clusters');
+      if (!response.ok) {
+        throw new Error(`cluster api returned ${response.status}`);
+      }
+      state.payload = await response.json();
+      if (state.selectedWalletAddress && !state.payload.wallets.find(wallet => wallet.address === state.selectedWalletAddress)) {
+        state.selectedWalletAddress = null;
+      }
+      renderGraph();
+      document.getElementById('last-updated').textContent = `Last updated ${new Date().toLocaleTimeString()}`;
+    }
+
+    function syncControlLabels() {
+      document.getElementById('min-win-rate-value').textContent = `${state.filters.minWinRate}%`;
+      document.getElementById('min-trade-count-value').textContent = `${state.filters.minTradeCount}`;
+      document.getElementById('min-edge-weight-value').textContent = `${state.filters.minEdgeWeight}`;
+    }
+
+    function bindControls() {
+      document.getElementById('min-win-rate').addEventListener('input', event => {
+        state.filters.minWinRate = Number(event.target.value || 0);
+        syncControlLabels();
+        renderGraph();
+      });
+      document.getElementById('min-trade-count').addEventListener('input', event => {
+        state.filters.minTradeCount = Number(event.target.value || 0);
+        syncControlLabels();
+        renderGraph();
+      });
+      document.getElementById('min-edge-weight').addEventListener('input', event => {
+        state.filters.minEdgeWeight = Number(event.target.value || 1);
+        syncControlLabels();
+        renderGraph();
+      });
+      document.getElementById('convoy-only').addEventListener('change', event => {
+        state.filters.convoyOnly = Boolean(event.target.checked);
+        renderGraph();
+      });
+      window.addEventListener('resize', () => {
+        if (state.payload.wallets.length) {
+          renderGraph();
+        }
+      });
+    }
+
+    async function bootstrap() {
+      syncControlLabels();
+      bindControls();
+      try {
+        await refreshData();
+      } catch (error) {
+        document.getElementById('graph-stats').textContent = 'Failed to load cluster graph';
+        document.getElementById('selected-wallet').innerHTML = `<div class="empty-state">${error.message}</div>`;
+      }
+      setInterval(async () => {
+        try {
+          await refreshData();
+        } catch (error) {
+          document.getElementById('graph-stats').textContent = 'Cluster refresh failed';
+        }
+      }, 60000);
+    }
+
+    bootstrap();
+  </script>
+</body>
+</html>

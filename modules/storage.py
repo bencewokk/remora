@@ -454,6 +454,29 @@ class Storage:
             ).fetchall()
             return [str(row["address"]) for row in rows]
 
+    def list_cluster_book_events(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT market_id, asset_id, outcome_side, timestamp, trigger_address
+                FROM book_events
+                WHERE is_reset = 0
+                ORDER BY market_id, asset_id, timestamp
+                """
+            ).fetchall()
+
+    def list_cluster_perp_book_events(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT market_id, asset_id, coin, timestamp, trigger_address,
+                       best_bid, best_ask, mid_price, bids_json, asks_json
+                FROM perp_book_events
+                WHERE is_reset = 0
+                ORDER BY market_id, asset_id, timestamp
+                """
+            ).fetchall()
+
     def list_wallet_scores(self) -> list[sqlite3.Row]:
         with self.connect() as connection:
             return connection.execute(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from bisect import bisect_right
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime, timezone
 import json
 import sys
@@ -27,6 +27,12 @@ SIGNAL_QUALITY_WINDOW_SECONDS = 300
 MAX_PNL_SERIES_POINTS = 120
 PREDICTION_MARKET_META_TTL_SECONDS = 300
 WHALE_SPOTLIGHT_CACHE_TTL_SECONDS = 300
+CLUSTER_WINDOW_SECONDS = 30
+CLUSTER_COLLAPSE_SECONDS = 5
+CLUSTER_MIN_EDGE_WEIGHT = 2
+CLUSTER_CONVOY_MIN_WIN_RATE = 0.60
+CLUSTER_CONVOY_MIN_TRADE_COUNT = 5
+CLUSTER_RECENT_TRADES_LIMIT = 5
 SIGNAL_QUALITY_TRIGGER_TYPES = (
     "single_step_liquidity",
     "rapid_sequential_aggression",
@@ -684,9 +690,352 @@ def _portfolio_summary(prediction_positions: list[dict], perp_positions: list[di
     }
 
 
+def _wallet_address_key(address: str) -> str:
+    return address.strip().lower()
+
+
+def _parse_cluster_levels(levels_json: str | None) -> tuple[tuple[float, float], ...]:
+    if not levels_json:
+        return ()
+    try:
+        payload = json.loads(levels_json)
+    except (TypeError, ValueError):
+        return ()
+    levels: list[tuple[float, float]] = []
+    if not isinstance(payload, list):
+        return ()
+    for level in payload:
+        if not isinstance(level, dict):
+            continue
+        price = level.get("price", level.get("px"))
+        size = level.get("size", level.get("sz"))
+        if price in (None, "") or size in (None, ""):
+            continue
+        try:
+            levels.append((float(price), float(size)))
+        except (TypeError, ValueError):
+            continue
+    return tuple(levels)
+
+
+def _cluster_size_at_price(levels: tuple[tuple[float, float], ...], price: float) -> float:
+    for level_price, level_size in levels:
+        if level_price == price:
+            return level_size
+    return 0.0
+
+
+def _cluster_book_imbalance(bids: tuple[tuple[float, float], ...], asks: tuple[tuple[float, float], ...]) -> float:
+    bid_notional = sum(price * size for price, size in bids[:3])
+    ask_notional = sum(price * size for price, size in asks[:3])
+    total = bid_notional + ask_notional
+    if total <= 0:
+        return 0.5
+    return bid_notional / total
+
+
+def _derive_perp_cluster_side(
+    previous_row: Any | None,
+    current_row: Any,
+) -> str:
+    current_bids = _parse_cluster_levels(current_row["bids_json"])
+    current_asks = _parse_cluster_levels(current_row["asks_json"])
+    if previous_row is not None:
+        previous_bids = _parse_cluster_levels(previous_row["bids_json"])
+        previous_asks = _parse_cluster_levels(previous_row["asks_json"])
+        long_added = 0.0
+        short_added = 0.0
+        if current_bids:
+            current_bid_price, current_bid_size = current_bids[0]
+            previous_bid_size = _cluster_size_at_price(previous_bids, current_bid_price)
+            long_added = current_bid_price * max(current_bid_size - previous_bid_size, 0.0)
+        if current_asks:
+            current_ask_price, current_ask_size = current_asks[0]
+            previous_ask_size = _cluster_size_at_price(previous_asks, current_ask_price)
+            short_added = current_ask_price * max(current_ask_size - previous_ask_size, 0.0)
+        if long_added > short_added:
+            return "long"
+        if short_added > long_added:
+            return "short"
+
+        previous_mid = float(previous_row["mid_price"]) if previous_row["mid_price"] is not None else None
+        current_mid = float(current_row["mid_price"]) if current_row["mid_price"] is not None else None
+        if previous_mid is not None and current_mid is not None and previous_mid > 0:
+            price_impact = (current_mid - previous_mid) / previous_mid
+            if price_impact > 0:
+                return "long"
+            if price_impact < 0:
+                return "short"
+
+    return "long" if _cluster_book_imbalance(current_bids, current_asks) >= 0.5 else "short"
+
+
+def _collapse_cluster_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    collapsed: list[dict[str, Any]] = []
+    last_seen_by_key: dict[tuple[str, str, int, str, str], datetime] = {}
+    for event in sorted(
+        events,
+        key=lambda item: (item["market_type"], item["market_id"], item["asset_id"], item["side"], item["timestamp"]),
+    ):
+        key = (
+            event["market_type"],
+            event["market_id"],
+            int(event["asset_id"]),
+            event["side"],
+            event["address_key"],
+        )
+        previous_timestamp = last_seen_by_key.get(key)
+        if previous_timestamp is not None and (event["timestamp"] - previous_timestamp).total_seconds() <= CLUSTER_COLLAPSE_SECONDS:
+            continue
+        last_seen_by_key[key] = event["timestamp"]
+        collapsed.append(event)
+    return collapsed
+
+
+def _cluster_prediction_events(storage: Storage) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for row in storage.list_cluster_book_events():
+        address = str(row["trigger_address"] or "").strip()
+        if not address:
+            continue
+        timestamp = _parse_iso_timestamp(str(row["timestamp"]))
+        if timestamp is None:
+            continue
+        events.append(
+            {
+                "market_type": "prediction",
+                "market_id": str(row["market_id"]),
+                "asset_id": int(row["asset_id"]),
+                "side": str(row["outcome_side"]),
+                "timestamp": timestamp,
+                "address": address,
+                "address_key": _wallet_address_key(address),
+                "coin": None,
+            }
+        )
+    return _collapse_cluster_events(events)
+
+
+def _cluster_perp_events(storage: Storage) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    previous_rows: dict[tuple[str, int], Any] = {}
+    for row in storage.list_cluster_perp_book_events():
+        key = (str(row["market_id"]), int(row["asset_id"]))
+        previous_row = previous_rows.get(key)
+        previous_rows[key] = row
+        address = str(row["trigger_address"] or "").strip()
+        if not address:
+            continue
+        timestamp = _parse_iso_timestamp(str(row["timestamp"]))
+        if timestamp is None:
+            continue
+        events.append(
+            {
+                "market_type": "perp",
+                "market_id": str(row["market_id"]),
+                "asset_id": int(row["asset_id"]),
+                "side": _derive_perp_cluster_side(previous_row, row),
+                "timestamp": timestamp,
+                "address": address,
+                "address_key": _wallet_address_key(address),
+                "coin": str(row["coin"]),
+            }
+        )
+    return _collapse_cluster_events(events)
+
+
+def _cluster_wallet_score_map(storage: Storage) -> dict[str, dict[str, Any]]:
+    scores: dict[str, dict[str, Any]] = {}
+    for row in storage.list_wallet_scores():
+        address = str(row["address"])
+        scores[_wallet_address_key(address)] = {
+            "address": address,
+            "win_rate": float(row["win_rate"]),
+            "total_pnl_usdh": float(row["total_pnl_usdh"]),
+            "trade_count": int(row["trade_count"]),
+            "last_active_ts": _normalize_unix_timestamp(int(row["last_trade_ts"])) if row["last_trade_ts"] is not None else None,
+        }
+    return scores
+
+
+def _cluster_recent_trades(events: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    recent_trades: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for event in sorted(events, key=lambda item: item["timestamp"], reverse=True):
+        wallet_trades = recent_trades[event["address_key"]]
+        if len(wallet_trades) >= CLUSTER_RECENT_TRADES_LIMIT:
+            continue
+        wallet_trades.append(
+            {
+                "market_id": event["market_id"],
+                "market_type": event["market_type"],
+                "coin": event["coin"],
+                "side": event["side"],
+                "timestamp": event["timestamp"].isoformat(),
+            }
+        )
+    return dict(recent_trades)
+
+
+def _cluster_edges(events: list[dict[str, Any]], address_display: dict[str, str]) -> list[dict[str, Any]]:
+    events_by_market_and_side: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        events_by_market_and_side[(event["market_id"], event["side"])].append(event)
+
+    edge_stats: dict[tuple[str, str], dict[str, Any]] = {}
+    for (market_id, _side), group in events_by_market_and_side.items():
+        ordered_group = sorted(group, key=lambda item: item["timestamp"])
+        for index, left in enumerate(ordered_group):
+            for right in ordered_group[index + 1 :]:
+                delta_seconds = (right["timestamp"] - left["timestamp"]).total_seconds()
+                if delta_seconds > CLUSTER_WINDOW_SECONDS:
+                    break
+                if left["address_key"] == right["address_key"]:
+                    continue
+                pair = tuple(sorted((left["address_key"], right["address_key"])))
+                stat = edge_stats.setdefault(
+                    pair,
+                    {
+                        "source": address_display.get(pair[0], pair[0]),
+                        "target": address_display.get(pair[1], pair[1]),
+                        "weight": 0,
+                        "markets": set(),
+                        "delta_sum": 0.0,
+                    },
+                )
+                stat["weight"] += 1
+                stat["markets"].add(market_id)
+                stat["delta_sum"] += delta_seconds
+
+    return [
+        {
+            "source": stat["source"],
+            "target": stat["target"],
+            "weight": int(stat["weight"]),
+            "markets": sorted(stat["markets"]),
+            "avg_time_delta_seconds": stat["delta_sum"] / stat["weight"],
+        }
+        for stat in sorted(edge_stats.values(), key=lambda item: (-item["weight"], item["source"], item["target"]))
+        if int(stat["weight"]) >= CLUSTER_MIN_EDGE_WEIGHT
+    ]
+
+
+def _cluster_convoys(
+    events: list[dict[str, Any]],
+    scores_by_wallet: dict[str, dict[str, Any]],
+    address_display: dict[str, str],
+) -> list[dict[str, Any]]:
+    eligible_wallets = {
+        address_key: score
+        for address_key, score in scores_by_wallet.items()
+        if score["win_rate"] is not None
+        and float(score["win_rate"]) >= CLUSTER_CONVOY_MIN_WIN_RATE
+        and int(score["trade_count"]) >= CLUSTER_CONVOY_MIN_TRADE_COUNT
+    }
+    events_by_market_and_side: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for event in events:
+        if event["address_key"] not in eligible_wallets:
+            continue
+        events_by_market_and_side[(event["market_id"], event["side"])].append(event)
+
+    emitted_at: dict[tuple[str, str, tuple[str, ...]], datetime] = {}
+    convoys: list[dict[str, Any]] = []
+    for (market_id, side), group in events_by_market_and_side.items():
+        ordered_group = sorted(group, key=lambda item: item["timestamp"])
+        window: deque[dict[str, Any]] = deque()
+        for event in ordered_group:
+            window.append(event)
+            cutoff_timestamp = event["timestamp"].timestamp() - CLUSTER_WINDOW_SECONDS
+            while window and window[0]["timestamp"].timestamp() < cutoff_timestamp:
+                window.popleft()
+            wallet_keys = tuple(sorted({item["address_key"] for item in window}))
+            if len(wallet_keys) < 2:
+                continue
+            convoy_key = (market_id, side, wallet_keys)
+            last_emitted_timestamp = emitted_at.get(convoy_key)
+            if last_emitted_timestamp is not None and (event["timestamp"] - last_emitted_timestamp).total_seconds() <= CLUSTER_WINDOW_SECONDS:
+                continue
+            emitted_at[convoy_key] = event["timestamp"]
+            combined_win_rate = sum(float(eligible_wallets[wallet_key]["win_rate"]) for wallet_key in wallet_keys) / len(wallet_keys)
+            convoys.append(
+                {
+                    "wallets": [address_display.get(wallet_key, wallet_key) for wallet_key in wallet_keys],
+                    "market_id": market_id,
+                    "side": side,
+                    "timestamp": event["timestamp"].isoformat(),
+                    "combined_win_rate": combined_win_rate,
+                }
+            )
+    return sorted(convoys, key=lambda item: item["timestamp"], reverse=True)
+
+
+def _wallet_clusters(storage: Storage) -> dict[str, Any]:
+    scores_by_wallet = _cluster_wallet_score_map(storage)
+    prediction_events = _cluster_prediction_events(storage)
+    perp_events = _cluster_perp_events(storage)
+    all_events = sorted([*prediction_events, *perp_events], key=lambda item: item["timestamp"])
+
+    address_display: dict[str, str] = {}
+    last_active_by_wallet: dict[str, int] = {}
+    for event in all_events:
+        address_display.setdefault(event["address_key"], event["address"])
+        last_active_by_wallet[event["address_key"]] = int(event["timestamp"].timestamp())
+
+    edges = _cluster_edges(all_events, address_display)
+    convoys = _cluster_convoys(all_events, scores_by_wallet, address_display)
+    recent_trades = _cluster_recent_trades(all_events)
+
+    relevant_wallets: set[str] = set()
+    for edge in edges:
+        relevant_wallets.add(_wallet_address_key(str(edge["source"])))
+        relevant_wallets.add(_wallet_address_key(str(edge["target"])))
+    for convoy in convoys:
+        relevant_wallets.update(_wallet_address_key(str(address)) for address in convoy["wallets"])
+
+    wallets = []
+    for wallet_key in sorted(relevant_wallets):
+        score = scores_by_wallet.get(wallet_key)
+        wallets.append(
+            {
+                "address": address_display.get(wallet_key, score["address"] if score is not None else wallet_key),
+                "win_rate": score["win_rate"] if score is not None else None,
+                "total_pnl_usdh": score["total_pnl_usdh"] if score is not None else 0.0,
+                "trade_count": score["trade_count"] if score is not None else 0,
+                "last_active_ts": (
+                    score["last_active_ts"]
+                    if score is not None and score["last_active_ts"] is not None
+                    else last_active_by_wallet.get(wallet_key)
+                ),
+                "recent_trades": recent_trades.get(wallet_key, []),
+            }
+        )
+
+    wallets.sort(
+        key=lambda item: (
+            -(float(item["win_rate"]) if item["win_rate"] is not None else -1.0),
+            -float(item["total_pnl_usdh"]),
+            item["address"],
+        )
+    )
+    return {
+        "wallets": wallets,
+        "edges": edges,
+        "convoys": convoys,
+    }
+
+
 @app.get("/api/pnl-series")
 def pnl_series() -> object:
     return jsonify(_pnl_series(get_storage()))
+
+
+@app.get("/clusters")
+def clusters() -> str:
+    return render_template("clusters.html")
+
+
+@app.get("/api/wallet-clusters")
+def wallet_clusters() -> object:
+    return jsonify(_wallet_clusters(get_storage()))
 
 
 @app.get("/api/signal-quality")
