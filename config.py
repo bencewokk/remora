@@ -14,8 +14,6 @@ DEFAULT_TRACKED_PERP_COINS = (
     "HYPE",
     "ARB",
     "OP",
-    "NEAR",
-    "XLM",
     "XMR",
     "LIT",
     "XRP",
@@ -65,6 +63,7 @@ class Config:
     perp_whale_size_threshold: float
     perp_price_impact_threshold: float
     perp_min_trigger_delta_usdh: float
+    perp_min_signal_confidence: float
     max_position_usdh: float
     drawdown_limit: float
     perp_max_position_usdh: float
@@ -102,6 +101,7 @@ class Config:
             perp_whale_size_threshold=float(os.getenv("PERP_WHALE_SIZE_THRESHOLD", "50000")),
             perp_price_impact_threshold=float(os.getenv("PERP_PRICE_IMPACT_THRESHOLD", "0.005")),
             perp_min_trigger_delta_usdh=float(os.getenv("PERP_MIN_TRIGGER_DELTA_USDH", "15000")),
+            perp_min_signal_confidence=float(os.getenv("PERP_MIN_SIGNAL_CONFIDENCE", "0.8")),
             max_position_usdh=float(os.getenv("MAX_POSITION_USDH", "200")),
             drawdown_limit=float(os.getenv("DRAWDOWN_LIMIT", "0.15")),
             perp_max_position_usdh=float(os.getenv("PERP_MAX_POSITION_USDH", "300")),

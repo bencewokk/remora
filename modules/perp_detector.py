@@ -39,6 +39,7 @@ class PerpWhaleDetector:
         self.whale_threshold = config.perp_whale_size_threshold
         self.price_impact_threshold = config.perp_price_impact_threshold
         self.min_trigger_delta_usdh = config.perp_min_trigger_delta_usdh
+        self.min_signal_confidence = config.perp_min_signal_confidence
         self.oi_spike_threshold_pct = config.perp_oi_spike_threshold_pct
         self.funding_divergence_threshold = config.funding_divergence_threshold
         self.book_imbalance_ratio_threshold = config.book_imbalance_ratio_threshold
@@ -49,9 +50,10 @@ class PerpWhaleDetector:
         self._market_cooldowns: dict[tuple[str, str], datetime] = {}
         self._warmup_remaining: dict[int, int] = {}
         LOGGER.info(
-            "PerpWhaleDetector initialized with whale threshold: %s, min trigger delta: %s",
+            "PerpWhaleDetector initialized with whale threshold: %s, min trigger delta: %s, min signal confidence: %s",
             self.whale_threshold,
             self.min_trigger_delta_usdh,
+            self.min_signal_confidence,
         )
 
     async def run(self) -> None:
@@ -135,9 +137,14 @@ class PerpWhaleDetector:
         if snapshot.trigger_address:
             details["trigger_address"] = snapshot.trigger_address
 
-        if max(long_added, short_added) >= self.whale_threshold:
+        single_step_side = self._single_step_trigger_side(
+            long_added=long_added,
+            short_added=short_added,
+            imbalance=imbalance,
+        )
+        if single_step_side is not None:
             triggers.append("single_step_liquidity")
-            trigger_sides.append("long" if long_added >= short_added else "short")
+            trigger_sides.append(single_step_side)
 
         rapid_trigger_side = self._rapid_trigger_side(
             long_added=long_added,
@@ -186,6 +193,8 @@ class PerpWhaleDetector:
             price_impact=price_impact,
             trigger_oi_spike=trigger_oi_spike,
         )
+        if confidence < self.min_signal_confidence:
+            return None
         details["confidence"] = round(confidence, 6)
         details["wallet_bonus_applied"] = wallet_bonus_applied
         details["trigger_oi_spike"] = trigger_oi_spike
@@ -244,6 +253,29 @@ class PerpWhaleDetector:
         )
         if long_eligible and short_eligible:
             return "long" if long_aggression >= short_aggression else "short"
+        if long_eligible:
+            return "long"
+        if short_eligible:
+            return "short"
+        return None
+
+    def _single_step_trigger_side(
+        self,
+        *,
+        long_added: float,
+        short_added: float,
+        imbalance: float,
+    ) -> str | None:
+        long_eligible = (
+            long_added >= self.whale_threshold
+            and imbalance >= self.book_imbalance_ratio_threshold
+        )
+        short_eligible = (
+            short_added >= self.whale_threshold
+            and imbalance <= (1 - self.book_imbalance_ratio_threshold)
+        )
+        if long_eligible and short_eligible:
+            return "long" if long_added >= short_added else "short"
         if long_eligible:
             return "long"
         if short_eligible:
