@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections import Counter, defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -10,6 +11,7 @@ from config import Config
 from .models import PerpSnapshot, PerpWhaleSignal
 from .storage import Storage
 
+LOGGER = logging.getLogger(__name__)
 MARKET_SIGNAL_COOLDOWN_SECONDS = 60
 OI_SPIKE_WINDOW_SECONDS = 60
 POST_RESET_WARMUP_SNAPSHOTS = 3
@@ -34,12 +36,23 @@ class PerpWhaleDetector:
         self.storage = storage
         self.snapshot_queue = snapshot_queue
         self.signal_queue = signal_queue
+        self.whale_threshold = config.perp_whale_size_threshold
+        self.price_impact_threshold = config.perp_price_impact_threshold
+        self.min_trigger_delta_usdh = config.perp_min_trigger_delta_usdh
+        self.oi_spike_threshold_pct = config.perp_oi_spike_threshold_pct
+        self.funding_divergence_threshold = config.funding_divergence_threshold
+        self.book_imbalance_ratio_threshold = config.book_imbalance_ratio_threshold
         self._previous_snapshots: dict[int, PerpSnapshot] = {}
         self._aggression_history: dict[int, Deque[AggressionEvent]] = defaultdict(deque)
         self._mid_price_history: dict[int, Deque[tuple[datetime, float]]] = defaultdict(deque)
         self._open_interest_history: dict[int, Deque[tuple[datetime, float]]] = defaultdict(deque)
         self._market_cooldowns: dict[tuple[str, str], datetime] = {}
         self._warmup_remaining: dict[int, int] = {}
+        LOGGER.info(
+            "PerpWhaleDetector initialized with whale threshold: %s, min trigger delta: %s",
+            self.whale_threshold,
+            self.min_trigger_delta_usdh,
+        )
 
     async def run(self) -> None:
         while True:
@@ -122,25 +135,31 @@ class PerpWhaleDetector:
         if snapshot.trigger_address:
             details["trigger_address"] = snapshot.trigger_address
 
-        if max(long_added, short_added) >= self.config.perp_whale_size_threshold:
+        if max(long_added, short_added) >= self.whale_threshold:
             triggers.append("single_step_liquidity")
             trigger_sides.append("long" if long_added >= short_added else "short")
 
-        if max(long_aggression, short_aggression) >= self.config.perp_whale_size_threshold:
+        rapid_trigger_side = self._rapid_trigger_side(
+            long_added=long_added,
+            short_added=short_added,
+            long_aggression=long_aggression,
+            short_aggression=short_aggression,
+        )
+        if rapid_trigger_side is not None:
             triggers.append("rapid_sequential_aggression")
-            trigger_sides.append("long" if long_aggression >= short_aggression else "short")
+            trigger_sides.append(rapid_trigger_side)
 
-        if abs(price_impact) >= self.config.perp_price_impact_threshold:
+        if abs(price_impact) >= self.price_impact_threshold:
             triggers.append("price_impact")
             trigger_sides.append("long" if price_impact > 0 else "short")
 
-        trigger_oi_spike = abs(oi_change_pct) >= self.config.perp_oi_spike_threshold_pct
+        trigger_oi_spike = abs(oi_change_pct) >= self.oi_spike_threshold_pct
         if trigger_oi_spike:
             triggers.append("oi_spike")
             trigger_sides.append(self._direction_from_context(price_impact, imbalance))
 
         trigger_funding = False
-        if abs(snapshot.funding_rate) >= self.config.funding_divergence_threshold:
+        if abs(snapshot.funding_rate) >= self.funding_divergence_threshold:
             funding_side = "long" if snapshot.funding_rate > 0 else "short"
             if (funding_side == "long" and price_impact > 0) or (funding_side == "short" and price_impact < 0):
                 trigger_funding = True
@@ -150,9 +169,15 @@ class PerpWhaleDetector:
         if not triggers:
             return None
 
+        if "rapid_sequential_aggression" in triggers and long_added <= 0 and short_added <= 0:
+            return None
+
         side = self._resolve_side(trigger_sides)
         if self._is_market_side_on_cooldown(snapshot.market_id, side, snapshot.timestamp):
             return None
+
+        triggering_same_side_delta = long_added if side == "long" else short_added
+        triggering_same_side_cumulative = long_aggression if side == "long" else short_aggression
 
         confidence, wallet_bonus_applied = self._confidence(
             snapshot=snapshot,
@@ -165,7 +190,12 @@ class PerpWhaleDetector:
         details["wallet_bonus_applied"] = wallet_bonus_applied
         details["trigger_oi_spike"] = trigger_oi_spike
         details["trigger_funding"] = trigger_funding
+        details["triggering_bid_added_usdh"] = round(long_added, 6)
+        details["triggering_ask_added_usdh"] = round(short_added, 6)
+        details["triggering_same_side_delta_usdh"] = round(triggering_same_side_delta, 6)
+        details["triggering_same_side_cumulative_usdh"] = round(triggering_same_side_cumulative, 6)
 
+        self._rearm_signal_state(snapshot)
         self._set_market_cooldown(snapshot.market_id, snapshot.timestamp)
         return PerpWhaleSignal(
             market_id=snapshot.market_id,
@@ -192,6 +222,33 @@ class PerpWhaleDetector:
         self._previous_snapshots[snapshot.asset_id] = snapshot
         self._record_mid_price(snapshot)
         self._record_open_interest(snapshot)
+
+    def _rearm_signal_state(self, snapshot: PerpSnapshot) -> None:
+        self._reset_asset_state(snapshot.asset_id)
+
+    def _rapid_trigger_side(
+        self,
+        *,
+        long_added: float,
+        short_added: float,
+        long_aggression: float,
+        short_aggression: float,
+    ) -> str | None:
+        long_eligible = (
+            long_aggression >= self.whale_threshold
+            and long_added >= self.min_trigger_delta_usdh
+        )
+        short_eligible = (
+            short_aggression >= self.whale_threshold
+            and short_added >= self.min_trigger_delta_usdh
+        )
+        if long_eligible and short_eligible:
+            return "long" if long_aggression >= short_aggression else "short"
+        if long_eligible:
+            return "long"
+        if short_eligible:
+            return "short"
+        return None
 
     def _is_market_side_on_cooldown(self, market_id: str, side: str, timestamp: datetime) -> bool:
         cooldown_key = (market_id, side)
@@ -335,8 +392,8 @@ class PerpWhaleDetector:
         if trigger_oi_spike and ((side == "long" and price_impact > 0) or (side == "short" and price_impact < 0)):
             confidence += 0.1
         imbalance = self._book_imbalance_ratio(snapshot)
-        if (side == "long" and imbalance >= self.config.book_imbalance_ratio_threshold) or (
-            side == "short" and imbalance <= (1 - self.config.book_imbalance_ratio_threshold)
+        if (side == "long" and imbalance >= self.book_imbalance_ratio_threshold) or (
+            side == "short" and imbalance <= (1 - self.book_imbalance_ratio_threshold)
         ):
             confidence += 0.1
         if snapshot.trigger_address:

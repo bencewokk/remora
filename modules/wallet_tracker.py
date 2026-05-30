@@ -78,11 +78,18 @@ class WalletTracker:
 
             resolved_trades = self._resolved_outcome_trades(fills)
             trade_count = len(resolved_trades)
+            if trade_count == 0:
+                if index < len(refresh_addresses) - 1:
+                    await self._pause(WALLET_REFRESH_DELAY_SECONDS)
+                continue
+
             win_count = sum(1 for trade in resolved_trades.values() if trade.pnl_usdh > 0)
             total_pnl = sum(trade.pnl_usdh for trade in resolved_trades.values())
             avg_pnl = total_pnl / trade_count if trade_count else 0.0
             win_rate = win_count / trade_count if trade_count else 0.0
             last_trade_ts = max((trade.last_trade_ts for trade in resolved_trades.values()), default=None)
+            if last_trade_ts is not None:
+                last_trade_ts = self._normalize_unix_timestamp(last_trade_ts)
             scores.append(
                 WalletScore(
                     address=address,

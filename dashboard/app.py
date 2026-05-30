@@ -16,6 +16,14 @@ from modules.storage import Storage
 app = Flask(__name__, template_folder=str(ROOT / "dashboard" / "templates"))
 
 
+def _normalize_unix_timestamp(timestamp: int | None) -> int | None:
+    if timestamp is None:
+        return None
+    if timestamp > 10_000_000_000:
+        return timestamp // 1000
+    return timestamp
+
+
 def get_storage() -> Storage:
     config = Config.from_env()
     storage = Storage(config.db_path)
@@ -40,10 +48,13 @@ def wallet_scores() -> object:
                 "win_rate": row["win_rate"],
                 "total_pnl_usdh": row["total_pnl_usdh"],
                 "avg_pnl_per_trade": row["avg_pnl_per_trade"],
-                "last_trade_ts": row["last_trade_ts"],
+                "last_trade_ts": _normalize_unix_timestamp(
+                    int(row["last_trade_ts"]) if row["last_trade_ts"] is not None else None
+                ),
                 "last_updated_ts": row["last_updated_ts"],
             }
             for row in rows
+            if int(row["trade_count"]) > 0
         ]
     )
 

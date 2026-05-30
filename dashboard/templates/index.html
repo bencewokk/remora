@@ -329,7 +329,7 @@
         fetch('/api/perp-signals').then(r => r.json()),
         fetch('/api/perp-orders').then(r => r.json()),
       ]);
-      state.wallets = wallets;
+      state.wallets = wallets.filter(wallet => Number(wallet.trade_count) >= 3);
       state.predictionSignals = predictionSignals;
       state.predictionOrders = predictionOrders;
       state.perpSignals = perpSignals;

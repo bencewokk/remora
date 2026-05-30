@@ -9,7 +9,7 @@ from .adapter import HyperliquidAdapter
 from .models import PerpMarket
 
 LOGGER = logging.getLogger(__name__)
-TRACKED_PERP_COINS = ("BTC", "ETH", "SOL", "HYPE", "ARB", "OP")
+TRACKED_PERP_COINS = ("BTC", "ETH", "SOL", "HYPE", "ARB", "OP", "NEAR", "XLM", "XMR", "LIT")
 
 
 def _ctx_float(ctx: dict, key: str) -> float:
