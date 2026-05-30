@@ -51,7 +51,7 @@ class Config:
             private_key=os.getenv("HL_PRIVATE_KEY"),
             wallet_address=os.getenv("HL_WALLET_ADDRESS"),
             testnet=testnet,
-            paper_trade=_parse_bool(os.getenv("HL_PAPER_TRADE"), True),
+            paper_trade=_parse_bool(os.getenv("HL_PAPER_TRADE"), False),
             whale_size_threshold=float(os.getenv("WHALE_SIZE_THRESHOLD", "500")),
             price_impact_threshold=float(os.getenv("PRICE_IMPACT_THRESHOLD", "0.03")),
             max_position_usdh=float(os.getenv("MAX_POSITION_USDH", "200")),

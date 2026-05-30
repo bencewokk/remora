@@ -88,7 +88,7 @@ class WalletTracker:
                 continue
             market_id = WalletTracker._market_id_from_coin(coin)
             pnl = float(fill.get("closedPnl", 0.0) or 0.0)
-            timestamp = int(fill.get("time", 0) or 0)
+            timestamp = WalletTracker._normalize_unix_timestamp(int(fill.get("time", 0) or 0))
             if pnl == 0.0:
                 continue
             grouped[market_id]["pnl"] = float(grouped[market_id]["pnl"]) + pnl
@@ -107,3 +107,9 @@ class WalletTracker:
     def _market_id_from_coin(coin: str) -> str:
         encoding = int(coin[1:])
         return str(encoding // 10)
+
+    @staticmethod
+    def _normalize_unix_timestamp(timestamp: int) -> int:
+        if timestamp > 10_000_000_000:
+            return timestamp // 1000
+        return timestamp

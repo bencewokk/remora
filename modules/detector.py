@@ -10,6 +10,8 @@ from config import Config
 from .models import OrderBookSnapshot, WhaleSignal
 from .storage import Storage
 
+MARKET_SIGNAL_COOLDOWN_SECONDS = 60
+
 
 @dataclass(frozen=True)
 class AggressionEvent:
@@ -32,6 +34,8 @@ class WhaleDetector:
         self._previous_snapshots: dict[int, OrderBookSnapshot] = {}
         self._aggression_history: dict[int, Deque[AggressionEvent]] = defaultdict(deque)
         self._mid_price_history: dict[int, Deque[tuple[datetime, float]]] = defaultdict(deque)
+        self._market_cooldowns: dict[str, datetime] = {}
+        self._active_market_id: str | None = None
 
     async def run(self) -> None:
         while True:
@@ -57,6 +61,7 @@ class WhaleDetector:
                 self.snapshot_queue.task_done()
 
     def process_snapshot(self, snapshot: OrderBookSnapshot) -> WhaleSignal | None:
+        self._reset_state_if_market_rotated(snapshot.market_id)
         previous = self._previous_snapshots.get(snapshot.asset_id)
         self._previous_snapshots[snapshot.asset_id] = snapshot
 
@@ -103,9 +108,13 @@ class WhaleDetector:
         if trigger_type is None:
             return None
 
+        if self._is_market_on_cooldown(snapshot.market_id, snapshot.timestamp):
+            return None
+
         confidence, wallet_bonus_applied = self._confidence(trigger_type, snapshot)
         details["confidence"] = round(confidence, 6)
         details["wallet_bonus_applied"] = wallet_bonus_applied
+        self._market_cooldowns[snapshot.market_id] = snapshot.timestamp + timedelta(seconds=MARKET_SIGNAL_COOLDOWN_SECONDS)
         return WhaleSignal(
             market_id=snapshot.market_id,
             asset_id=snapshot.asset_id,
@@ -116,6 +125,27 @@ class WhaleDetector:
             wallet_bonus_applied=wallet_bonus_applied,
             details=details,
         )
+
+    def _reset_state_if_market_rotated(self, market_id: str) -> None:
+        if self._active_market_id is None:
+            self._active_market_id = market_id
+            return
+        if self._active_market_id == market_id:
+            return
+        self._active_market_id = market_id
+        self._previous_snapshots.clear()
+        self._aggression_history.clear()
+        self._mid_price_history.clear()
+        self._market_cooldowns.clear()
+
+    def _is_market_on_cooldown(self, market_id: str, timestamp: datetime) -> bool:
+        cooldown_until = self._market_cooldowns.get(market_id)
+        if cooldown_until is None:
+            return False
+        if timestamp >= cooldown_until:
+            del self._market_cooldowns[market_id]
+            return False
+        return True
 
     def _record_mid_price(self, snapshot: OrderBookSnapshot) -> None:
         if snapshot.mid_price is None:

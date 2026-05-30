@@ -161,7 +161,9 @@
 
     function formatTime(timestamp) {
       if (!timestamp) return 'n/a';
-      return new Date(Number(timestamp) * 1000).toLocaleString();
+      const raw = Number(timestamp);
+      const normalized = raw > 10000000000 ? Math.floor(raw / 1000) : raw;
+      return new Date(normalized * 1000).toLocaleString();
     }
 
     function formatIso(value) {
