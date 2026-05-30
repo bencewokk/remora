@@ -5,7 +5,7 @@ import logging
 from contextlib import suppress
 
 from config import Config
-from modules import HyperliquidAdapter, L2BookFeeder, OrderExecutor, RiskManager, WhaleDetector, discover_btc_daily_market
+from modules import HyperliquidAdapter, L2BookFeeder, OrderExecutor, RiskManager, WalletTracker, WhaleDetector, discover_btc_daily_market
 from modules.models import WhaleSignal
 from modules.storage import Storage
 
@@ -95,6 +95,7 @@ async def async_main() -> None:
     snapshot_queue: asyncio.Queue = asyncio.Queue()
     signal_queue: asyncio.Queue = asyncio.Queue()
     detector = WhaleDetector(config, storage, snapshot_queue, signal_queue)
+    wallet_tracker = WalletTracker(config, storage, adapter)
     LOGGER.info(
         "Remora initialized for %s in %s mode",
         "testnet" if config.testnet else "mainnet",
@@ -104,11 +105,13 @@ async def async_main() -> None:
     detector_task = asyncio.create_task(detector.run(), name="detector")
     signal_task = asyncio.create_task(signal_handler(config, signal_queue, risk_manager, executor), name="signal-handler")
     discovery_task = asyncio.create_task(discovery_loop(config, adapter, storage, snapshot_queue), name="discovery-loop")
+    wallet_tracker_task = asyncio.create_task(wallet_tracker.run(), name="wallet-tracker")
 
     try:
-        await asyncio.gather(detector_task, signal_task, discovery_task)
+        await asyncio.gather(detector_task, signal_task, discovery_task, wallet_tracker_task)
     finally:
-        for task in (discovery_task, signal_task, detector_task):
+        await wallet_tracker.stop()
+        for task in (wallet_tracker_task, discovery_task, signal_task, detector_task):
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task

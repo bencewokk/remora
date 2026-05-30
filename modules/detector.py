@@ -49,6 +49,7 @@ class WhaleDetector:
                             trigger_type=signal.trigger_type,
                             timestamp=signal.timestamp,
                             signal_id=signal_id,
+                            wallet_bonus_applied=signal.wallet_bonus_applied,
                             details=signal.details,
                         )
                     )
@@ -80,6 +81,8 @@ class WhaleDetector:
         }
         if snapshot.mid_price is not None:
             details["mid_price"] = round(snapshot.mid_price, 6)
+        if snapshot.trigger_address:
+            details["trigger_address"] = snapshot.trigger_address
 
         if top_of_book_added >= self.config.whale_size_threshold:
             trigger_type = "single_step_liquidity"
@@ -100,8 +103,9 @@ class WhaleDetector:
         if trigger_type is None:
             return None
 
-        confidence = self._confidence(trigger_type, snapshot)
+        confidence, wallet_bonus_applied = self._confidence(trigger_type, snapshot)
         details["confidence"] = round(confidence, 6)
+        details["wallet_bonus_applied"] = wallet_bonus_applied
         return WhaleSignal(
             market_id=snapshot.market_id,
             asset_id=snapshot.asset_id,
@@ -109,6 +113,7 @@ class WhaleDetector:
             confidence=confidence,
             trigger_type=trigger_type,
             timestamp=snapshot.timestamp,
+            wallet_bonus_applied=wallet_bonus_applied,
             details=details,
         )
 
@@ -169,16 +174,22 @@ class WhaleDetector:
             return 0.0
         return max((current_mid - baseline_mid) / baseline_mid, 0.0)
 
-    def _confidence(self, trigger_type: str, snapshot: OrderBookSnapshot) -> float:
+    def _confidence(self, trigger_type: str, snapshot: OrderBookSnapshot) -> tuple[float, bool]:
         base_scores = {
             "single_step_liquidity": 0.6,
             "rapid_sequential_aggression": 0.7,
             "price_impact_with_aggression": 0.8,
         }
         confidence = base_scores[trigger_type]
+        wallet_bonus_applied = False
 
         if self._aggression_total(snapshot.asset_id, self.config.aggression_window_seconds) >= self.config.whale_size_threshold:
             confidence += 0.1
         if self._book_imbalance_ratio(snapshot) >= self.config.book_imbalance_ratio_threshold:
             confidence += 0.1
-        return min(confidence, 1.0)
+        if snapshot.trigger_address:
+            wallet_score = self.storage.get_wallet_score(snapshot.trigger_address)
+            if wallet_score is not None and wallet_score.win_rate >= 0.65 and wallet_score.trade_count >= 8:
+                confidence += 0.15
+                wallet_bonus_applied = True
+        return min(confidence, 1.0), wallet_bonus_applied

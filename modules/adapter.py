@@ -58,16 +58,7 @@ class HyperliquidAdapter:
         return self._session
 
     async def fetch_outcome_meta(self) -> dict[str, Any]:
-        if self._sdk_info is not None and hasattr(self._sdk_info, "post"):
-            try:
-                return self._sdk_info.post("/info", {"type": "outcomeMeta"})
-            except Exception:
-                pass
-
-        session = await self._get_session()
-        async with session.post(f"{self.config.rest_url}/info", json={"type": "outcomeMeta"}) as response:
-            response.raise_for_status()
-            return await response.json()
+        return await self.post_info({"type": "outcomeMeta"})
 
     async def fetch_l2_book(self, coin: str) -> dict[str, Any]:
         if self._sdk_info is not None and hasattr(self._sdk_info, "l2_snapshot"):
@@ -75,11 +66,33 @@ class HyperliquidAdapter:
                 return self._sdk_info.l2_snapshot(coin)
             except Exception:
                 pass
+        return await self.post_info({"type": "l2Book", "coin": coin})
+
+    async def post_info(self, payload: dict[str, Any]) -> dict[str, Any] | list[Any]:
+        if self._sdk_info is not None and hasattr(self._sdk_info, "post"):
+            try:
+                return self._sdk_info.post("/info", payload)
+            except Exception:
+                pass
 
         session = await self._get_session()
-        async with session.post(f"{self.config.rest_url}/info", json={"type": "l2Book", "coin": coin}) as response:
+        async with session.post(f"{self.config.rest_url}/info", json=payload) as response:
             response.raise_for_status()
             return await response.json()
+
+    async def fetch_user_fills_by_time(self, address: str, start_time: int | None = None) -> list[dict[str, Any]]:
+        if self._sdk_info is not None and hasattr(self._sdk_info, "user_fills_by_time"):
+            try:
+                if start_time is None:
+                    return list(self._sdk_info.user_fills(address))
+                return list(self._sdk_info.user_fills_by_time(address, start_time))
+            except Exception:
+                pass
+
+        payload: dict[str, Any] = {"user": address}
+        if start_time is None:
+            return list(await self.post_info({"type": "userFills", **payload}))
+        return list(await self.post_info({"type": "userFillsByTime", "startTime": start_time, **payload}))
 
     def patch_sdk_outcome_assets(self, outcome_meta: dict[str, Any]) -> None:
         if self._sdk_info is None:

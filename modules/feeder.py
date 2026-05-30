@@ -4,6 +4,9 @@ import asyncio
 import json
 import logging
 from datetime import datetime, timezone
+from collections import deque
+
+from typing import Deque
 
 import websockets
 
@@ -28,6 +31,10 @@ class L2BookFeeder:
         self.market = market
         self._stop_event = asyncio.Event()
         self._last_fingerprints: dict[str, tuple] = {}
+        self._recent_trade_addresses: dict[str, Deque[tuple[datetime, str]]] = {
+            market.yes_coin: deque(),
+            market.no_coin: deque(),
+        }
 
     async def run(self) -> None:
         backoff_seconds = 1
@@ -57,13 +64,25 @@ class L2BookFeeder:
                         }
                     )
                 )
+                await websocket.send(
+                    json.dumps(
+                        {
+                            "method": "subscribe",
+                            "subscription": {"type": "trades", "coin": coin},
+                        }
+                    )
+                )
 
             reset_pending = {coin: True for coin in subscriptions}
             while not self._stop_event.is_set():
                 message = json.loads(await websocket.recv())
-                if message.get("channel") != "l2Book":
-                    continue
+                channel = message.get("channel")
                 payload = message.get("data", {})
+                if channel == "trades":
+                    self._record_trade_addresses(payload)
+                    continue
+                if channel != "l2Book":
+                    continue
                 coin = str(payload.get("coin", ""))
                 if coin not in reset_pending:
                     continue
@@ -102,6 +121,7 @@ class L2BookFeeder:
         outcome_side = "YES" if coin == self.market.yes_coin else "NO"
         timestamp_ms = payload.get("time")
         timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc) if timestamp_ms else datetime.now(tz=timezone.utc)
+        trigger_address = self._recent_trigger_address(coin, timestamp)
         return OrderBookSnapshot(
             market_id=self.market.market_id,
             asset_id=asset_id,
@@ -114,9 +134,39 @@ class L2BookFeeder:
             timestamp=timestamp,
             sequence_id=timestamp_ms,
             is_reset=is_reset,
+            trigger_address=trigger_address,
             raw_message=payload,
         )
 
     @staticmethod
     def _parse_levels(levels: list[dict]) -> list[DepthLevel]:
         return [DepthLevel(price=float(level["px"]), size=float(level["sz"])) for level in levels]
+
+    def _record_trade_addresses(self, trades_payload: list[dict]) -> None:
+        for trade in trades_payload:
+            coin = str(trade.get("coin", ""))
+            if coin not in self._recent_trade_addresses:
+                continue
+            users = trade.get("users") or []
+            if len(users) != 2:
+                continue
+            side = str(trade.get("side", ""))
+            trigger_address = str(users[0]) if side in {"B", "BUY", "Bid"} else str(users[1])
+            timestamp_ms = trade.get("time")
+            timestamp = datetime.fromtimestamp(timestamp_ms / 1000, tz=timezone.utc) if timestamp_ms else datetime.now(tz=timezone.utc)
+            queue = self._recent_trade_addresses[coin]
+            queue.append((timestamp, trigger_address))
+            cutoff = timestamp.timestamp() - 5
+            while queue and queue[0][0].timestamp() < cutoff:
+                queue.popleft()
+
+    def _recent_trigger_address(self, coin: str, timestamp: datetime) -> str | None:
+        trade_history = self._recent_trade_addresses.get(coin)
+        if not trade_history:
+            return None
+        cutoff = timestamp.timestamp() - 5
+        while trade_history and trade_history[0][0].timestamp() < cutoff:
+            trade_history.popleft()
+        if not trade_history:
+            return None
+        return trade_history[-1][1]

@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Remora Dashboard</title>
+  <style>
+    :root {
+      --bg: #0b1117;
+      --panel: #121a23;
+      --panel-border: #243142;
+      --text: #e8eef5;
+      --muted: #93a4b8;
+      --green: #37d67a;
+      --yellow: #f7c948;
+      --red: #f97066;
+      --blue: #4da3ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "Segoe UI", Tahoma, Geneva, Verdana, sans-serif;
+      background: radial-gradient(circle at top, #122235 0%, var(--bg) 45%);
+      color: var(--text);
+    }
+    header {
+      padding: 24px 28px 12px;
+    }
+    header h1 { margin: 0; font-size: 28px; }
+    header p { margin: 6px 0 0; color: var(--muted); }
+    main {
+      display: grid;
+      grid-template-columns: 1.4fr 1fr;
+      gap: 18px;
+      padding: 16px 24px 24px;
+    }
+    .panel {
+      background: rgba(18, 26, 35, 0.92);
+      border: 1px solid var(--panel-border);
+      border-radius: 18px;
+      padding: 18px;
+      box-shadow: 0 12px 32px rgba(0, 0, 0, 0.25);
+    }
+    .panel h2 { margin: 0 0 14px; font-size: 18px; }
+    .stack { display: grid; gap: 18px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+    }
+    th, td {
+      text-align: left;
+      padding: 10px 8px;
+      border-bottom: 1px solid rgba(147, 164, 184, 0.14);
+    }
+    th {
+      color: var(--muted);
+      cursor: pointer;
+      user-select: none;
+    }
+    th:hover { color: var(--text); }
+    .mono { font-family: Consolas, monospace; }
+    .metric-green { color: var(--green); }
+    .metric-yellow { color: var(--yellow); }
+    .metric-red { color: var(--red); }
+    .feed {
+      display: grid;
+      gap: 12px;
+      max-height: 420px;
+      overflow: auto;
+    }
+    .card {
+      border: 1px solid rgba(147, 164, 184, 0.14);
+      border-radius: 14px;
+      padding: 12px;
+      background: rgba(11, 17, 23, 0.65);
+    }
+    .row {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      margin-bottom: 6px;
+    }
+    .muted { color: var(--muted); }
+    .badge {
+      display: inline-block;
+      padding: 4px 8px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      border: 1px solid rgba(147, 164, 184, 0.25);
+    }
+    .badge-on { color: var(--green); border-color: rgba(55, 214, 122, 0.4); }
+    .badge-off { color: var(--muted); }
+    .progress {
+      height: 8px;
+      background: rgba(147, 164, 184, 0.18);
+      border-radius: 999px;
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .progress > span {
+      display: block;
+      height: 100%;
+      background: linear-gradient(90deg, var(--blue), var(--green));
+    }
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Remora Wallet Intelligence</h1>
+    <p>Wallet leaderboard, recent whale signals, and paper order activity.</p>
+  </header>
+  <main>
+    <section class="panel">
+      <h2>Whale Leaderboard</h2>
+      <table id="wallet-table">
+        <thead>
+          <tr>
+            <th data-key="address">Address</th>
+            <th data-key="trade_count">Trades</th>
+            <th data-key="win_rate">Win Rate</th>
+            <th data-key="total_pnl_usdh">Total PnL</th>
+            <th data-key="avg_pnl_per_trade">Avg PnL</th>
+            <th data-key="last_trade_ts">Last Active</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </section>
+    <section class="stack">
+      <section class="panel">
+        <h2>Recent Signals</h2>
+        <div id="signals" class="feed"></div>
+      </section>
+      <section class="panel">
+        <h2>Recent Orders</h2>
+        <div id="orders" class="feed"></div>
+      </section>
+    </section>
+  </main>
+  <script>
+    const state = { wallets: [], sortKey: 'win_rate', sortDir: 'desc' };
+
+    function truncateAddress(address) {
+      return address ? `${address.slice(0, 6)}...${address.slice(-4)}` : 'n/a';
+    }
+
+    function formatPercent(value) {
+      return `${(Number(value) * 100).toFixed(1)}%`;
+    }
+
+    function formatMoney(value) {
+      const amount = Number(value || 0);
+      return `${amount >= 0 ? '+' : ''}${amount.toFixed(2)}`;
+    }
+
+    function formatTime(timestamp) {
+      if (!timestamp) return 'n/a';
+      return new Date(Number(timestamp) * 1000).toLocaleString();
+    }
+
+    function formatIso(value) {
+      return value ? new Date(value).toLocaleString() : 'n/a';
+    }
+
+    function winRateClass(winRate) {
+      if (winRate >= 0.65) return 'metric-green';
+      if (winRate >= 0.5) return 'metric-yellow';
+      return 'metric-red';
+    }
+
+    function sortWallets() {
+      const factor = state.sortDir === 'asc' ? 1 : -1;
+      state.wallets.sort((left, right) => {
+        const a = left[state.sortKey];
+        const b = right[state.sortKey];
+        if (typeof a === 'string') return a.localeCompare(b) * factor;
+        return ((Number(a) || 0) - (Number(b) || 0)) * factor;
+      });
+    }
+
+    function renderWallets() {
+      sortWallets();
+      const tbody = document.querySelector('#wallet-table tbody');
+      tbody.innerHTML = state.wallets.map(wallet => `
+        <tr>
+          <td class="mono" title="${wallet.address}">${truncateAddress(wallet.address)}</td>
+          <td>${wallet.trade_count}</td>
+          <td class="${winRateClass(wallet.win_rate)}">${formatPercent(wallet.win_rate)}</td>
+          <td class="${wallet.total_pnl_usdh >= 0 ? 'metric-green' : 'metric-red'}">${formatMoney(wallet.total_pnl_usdh)}</td>
+          <td>${formatMoney(wallet.avg_pnl_per_trade)}</td>
+          <td>${formatTime(wallet.last_trade_ts)}</td>
+        </tr>
+      `).join('');
+    }
+
+    function renderSignals(signals) {
+      const container = document.getElementById('signals');
+      container.innerHTML = signals.map(signal => `
+        <article class="card">
+          <div class="row"><strong>${signal.market_id}</strong><span class="badge ${signal.wallet_bonus_applied ? 'badge-on' : 'badge-off'}">wallet bonus ${signal.wallet_bonus_applied ? 'on' : 'off'}</span></div>
+          <div class="row"><span>${signal.side}</span><span class="muted">${signal.trigger_type}</span></div>
+          <div class="muted">${formatIso(signal.timestamp)}</div>
+          <div class="progress"><span style="width:${Math.min(signal.confidence, 1) * 100}%"></span></div>
+        </article>
+      `).join('');
+    }
+
+    function renderOrders(orders) {
+      const container = document.getElementById('orders');
+      container.innerHTML = orders.map(order => `
+        <article class="card">
+          <div class="row"><strong>${order.market_id}</strong><span class="badge">${order.status}</span></div>
+          <div class="row"><span>${order.side}</span><span>${order.size_usdh} USDH @ ${Number(order.price).toFixed(4)}</span></div>
+          <div class="muted">${formatIso(order.created_at)}</div>
+        </article>
+      `).join('');
+    }
+
+    async function refresh() {
+      const [wallets, signals, orders] = await Promise.all([
+        fetch('/api/wallets').then(r => r.json()),
+        fetch('/api/signals').then(r => r.json()),
+        fetch('/api/orders').then(r => r.json()),
+      ]);
+      state.wallets = wallets;
+      renderWallets();
+      renderSignals(signals);
+      renderOrders(orders);
+    }
+
+    document.querySelectorAll('#wallet-table th').forEach(th => {
+      th.addEventListener('click', () => {
+        const key = th.dataset.key;
+        if (state.sortKey === key) {
+          state.sortDir = state.sortDir === 'asc' ? 'desc' : 'asc';
+        } else {
+          state.sortKey = key;
+          state.sortDir = key === 'address' ? 'asc' : 'desc';
+        }
+        renderWallets();
+      });
+    });
+
+    refresh();
+    setInterval(refresh, 10000);
+  </script>
+</body>
+</html>

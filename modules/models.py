@@ -42,6 +42,7 @@ class OrderBookSnapshot:
     timestamp: datetime = field(default_factory=utc_now)
     sequence_id: int | None = None
     is_reset: bool = False
+    trigger_address: str | None = None
     raw_message: dict[str, Any] | None = None
 
 
@@ -54,7 +55,20 @@ class WhaleSignal:
     trigger_type: str
     timestamp: datetime = field(default_factory=utc_now)
     signal_id: int | None = None
+    wallet_bonus_applied: bool = False
     details: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class WalletScore:
+    address: str
+    trade_count: int
+    win_count: int
+    win_rate: float
+    total_pnl_usdh: float
+    avg_pnl_per_trade: float
+    last_trade_ts: int | None
+    last_updated_ts: int
 
 
 @dataclass(frozen=True)

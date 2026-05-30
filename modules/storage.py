@@ -7,7 +7,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterator
 
-from .models import OrderBookSnapshot, OrderIntent, OrderResult, WhaleSignal
+from .models import OrderBookSnapshot, OrderIntent, OrderResult, WalletScore, WhaleSignal
 
 
 class Storage:
@@ -37,6 +37,7 @@ class Storage:
                     timestamp TEXT NOT NULL,
                     sequence_id INTEGER,
                     is_reset INTEGER NOT NULL DEFAULT 0,
+                    trigger_address TEXT,
                     best_bid REAL,
                     best_ask REAL,
                     mid_price REAL,
@@ -56,6 +57,7 @@ class Storage:
                     confidence REAL NOT NULL,
                     trigger_type TEXT NOT NULL,
                     timestamp TEXT NOT NULL,
+                    wallet_bonus_applied INTEGER NOT NULL DEFAULT 0,
                     details_json TEXT NOT NULL
                 );
 
@@ -92,9 +94,22 @@ class Storage:
                     peak_equity REAL NOT NULL,
                     updated_at TEXT NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS wallet_scores (
+                    address TEXT PRIMARY KEY,
+                    trade_count INTEGER NOT NULL,
+                    win_count INTEGER NOT NULL,
+                    win_rate REAL NOT NULL,
+                    total_pnl_usdh REAL NOT NULL,
+                    avg_pnl_per_trade REAL NOT NULL,
+                    last_trade_ts INTEGER,
+                    last_updated_ts INTEGER NOT NULL
+                );
                 """
             )
             self._ensure_orders_column(connection, "quantity", "INTEGER NOT NULL DEFAULT 0")
+            self._ensure_book_events_column(connection, "trigger_address", "TEXT")
+            self._ensure_whale_signals_column(connection, "wallet_bonus_applied", "INTEGER NOT NULL DEFAULT 0")
             row = connection.execute("SELECT id FROM ledger_state WHERE id = 1").fetchone()
             if row is None:
                 now = datetime.utcnow().isoformat()
@@ -116,6 +131,26 @@ class Storage:
             return
         connection.execute(f"ALTER TABLE orders ADD COLUMN {column_name} {column_type}")
 
+    @staticmethod
+    def _ensure_book_events_column(connection: sqlite3.Connection, column_name: str, column_type: str) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(book_events)").fetchall()
+        }
+        if column_name in columns:
+            return
+        connection.execute(f"ALTER TABLE book_events ADD COLUMN {column_name} {column_type}")
+
+    @staticmethod
+    def _ensure_whale_signals_column(connection: sqlite3.Connection, column_name: str, column_type: str) -> None:
+        columns = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(whale_signals)").fetchall()
+        }
+        if column_name in columns:
+            return
+        connection.execute(f"ALTER TABLE whale_signals ADD COLUMN {column_name} {column_type}")
+
     def insert_book_event(self, snapshot: OrderBookSnapshot) -> int:
         bids_json = json.dumps([level.__dict__ for level in snapshot.bids])
         asks_json = json.dumps([level.__dict__ for level in snapshot.asks])
@@ -125,8 +160,9 @@ class Storage:
                 """
                 INSERT INTO book_events (
                     market_id, asset_id, outcome_side, timestamp, sequence_id, is_reset,
+                    trigger_address,
                     best_bid, best_ask, mid_price, bids_json, asks_json, raw_message_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.market_id,
@@ -135,6 +171,7 @@ class Storage:
                     snapshot.timestamp.isoformat(),
                     snapshot.sequence_id,
                     1 if snapshot.is_reset else 0,
+                    snapshot.trigger_address,
                     snapshot.best_bid,
                     snapshot.best_ask,
                     snapshot.mid_price,
@@ -150,8 +187,8 @@ class Storage:
             cursor = connection.execute(
                 """
                 INSERT INTO whale_signals (
-                    market_id, asset_id, side, confidence, trigger_type, timestamp, details_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    market_id, asset_id, side, confidence, trigger_type, timestamp, wallet_bonus_applied, details_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     signal.market_id,
@@ -160,10 +197,121 @@ class Storage:
                     signal.confidence,
                     signal.trigger_type,
                     signal.timestamp.isoformat(),
+                    1 if signal.wallet_bonus_applied else 0,
                     json.dumps(signal.details),
                 ),
             )
             return int(cursor.lastrowid)
+
+    def get_wallet_score(self, address: str) -> WalletScore | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                """
+                SELECT address, trade_count, win_count, win_rate, total_pnl_usdh,
+                       avg_pnl_per_trade, last_trade_ts, last_updated_ts
+                FROM wallet_scores
+                WHERE lower(address) = lower(?)
+                """,
+                (address,),
+            ).fetchone()
+            if row is None:
+                return None
+            return WalletScore(
+                address=str(row["address"]),
+                trade_count=int(row["trade_count"]),
+                win_count=int(row["win_count"]),
+                win_rate=float(row["win_rate"]),
+                total_pnl_usdh=float(row["total_pnl_usdh"]),
+                avg_pnl_per_trade=float(row["avg_pnl_per_trade"]),
+                last_trade_ts=int(row["last_trade_ts"]) if row["last_trade_ts"] is not None else None,
+                last_updated_ts=int(row["last_updated_ts"]),
+            )
+
+    def upsert_wallet_scores(self, scores: list[WalletScore]) -> None:
+        if not scores:
+            return
+        with self.connect() as connection:
+            connection.executemany(
+                """
+                INSERT INTO wallet_scores (
+                    address, trade_count, win_count, win_rate, total_pnl_usdh,
+                    avg_pnl_per_trade, last_trade_ts, last_updated_ts
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(address) DO UPDATE SET
+                    trade_count = excluded.trade_count,
+                    win_count = excluded.win_count,
+                    win_rate = excluded.win_rate,
+                    total_pnl_usdh = excluded.total_pnl_usdh,
+                    avg_pnl_per_trade = excluded.avg_pnl_per_trade,
+                    last_trade_ts = excluded.last_trade_ts,
+                    last_updated_ts = excluded.last_updated_ts
+                """,
+                [
+                    (
+                        score.address,
+                        score.trade_count,
+                        score.win_count,
+                        score.win_rate,
+                        score.total_pnl_usdh,
+                        score.avg_pnl_per_trade,
+                        score.last_trade_ts,
+                        score.last_updated_ts,
+                    )
+                    for score in scores
+                ],
+            )
+
+    def list_tracked_wallet_addresses(self) -> list[str]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT DISTINCT trigger_address AS address
+                FROM book_events
+                WHERE trigger_address IS NOT NULL AND trigger_address != ''
+                UNION
+                SELECT address
+                FROM wallet_scores
+                """
+            ).fetchall()
+            return [str(row["address"]) for row in rows]
+
+    def list_wallet_scores(self) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT address, trade_count, win_count, win_rate, total_pnl_usdh,
+                       avg_pnl_per_trade, last_trade_ts, last_updated_ts
+                FROM wallet_scores
+                ORDER BY win_rate DESC, trade_count DESC, total_pnl_usdh DESC
+                """
+            ).fetchall()
+
+    def list_recent_whale_signals(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT id, market_id, asset_id, side, confidence, trigger_type,
+                       timestamp, wallet_bonus_applied, details_json
+                FROM whale_signals
+                ORDER BY timestamp DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+    def list_recent_orders(self, limit: int = 50) -> list[sqlite3.Row]:
+        with self.connect() as connection:
+            return connection.execute(
+                """
+                SELECT id, market_id, asset_id, side, size_usdh, quantity, price,
+                       client_order_id, order_id, status, filled_price, paper_trade,
+                       signal_id, created_at, updated_at, details_json
+                FROM orders
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
 
     def insert_order_intent(self, order: OrderIntent, status: str, details: dict | None = None) -> int:
         payload = details or {}
